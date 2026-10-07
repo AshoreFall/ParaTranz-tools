@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ParaTranz 直接标记已审核
+// @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.2.3
-// @description  增加空译文审核和“保存并检查”（管理员可用），修复注释 @ 候选人点击时失焦导致补全失败。
+// @version      1.3.0
+// @description  空译文审核、保存并检查、注释 @ 补全修复，以及分页加载修复与页码记忆。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
 // @run-at       document-idle
@@ -13,7 +13,7 @@
 (() => {
     'use strict';
 
-    // 本文件包含三个功能：空译文审核、保存并检查、注释 @ 点击补全。
+    // 功能：空译文审核、保存并检查、注释 @ 补全、分页加载修复与页码记忆。
     // 修改功能时，找到下面对应的中文注释即可。
     // ===== 运行状态 =====
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -150,6 +150,7 @@
 
     function sync() {
         scheduled = false;
+        syncPaging();
         if (!/^\/projects\/\d+\/strings\/?$/.test(page.location.pathname)) {
             unmount();
             return;
@@ -237,6 +238,152 @@
 
     // 监听页面点击，列表重新渲染后也能生效；无需管理员权限。
     doc.addEventListener('mousedown', keepMentionInputFocused, true);
+
+    // ===== 功能：分页加载修复与页码记忆 =====
+    let paging = null;
+
+    function positiveNumber(value, maximum = Number.MAX_SAFE_INTEGER) {
+        if (!/^\d+$/.test(String(value))) return null;
+        const number = Number(value);
+        return Number.isSafeInteger(number) && number > 0 && number <= maximum ? number : null;
+    }
+
+    function pagingVM() {
+        let vm = doc.querySelector('.strings')?.__vue__;
+        for (let count = 0; vm && count < 8; count++, vm = vm.$parent) {
+            if (vm.$options?.name === 'strings' && typeof vm.fetchStrings === 'function' &&
+                typeof vm.initStrings === 'function' && typeof vm.$watch === 'function') return vm;
+        }
+        return null;
+    }
+
+    function pagingKey(vm) {
+        // 每个项目、文件和筛选条件分别记忆，只保存页码和每页条数。
+        const query = vm.$route.query;
+        const filters = Object.keys(query).sort().filter(key =>
+            !['page', 'pageSize', 'anchor', 'ref', 'detailed'].includes(key) && query[key] != null)
+            .map(key => [key, query[key]]);
+        return 'paratranz-tools.paging.' + JSON.stringify([vm.$uid || 0, vm.$route.path, filters]);
+    }
+
+    function readPaging(key) {
+        try {
+            const value = JSON.parse(page.localStorage.getItem(key));
+            return positiveNumber(value?.page) && positiveNumber(value?.pageSize, 800) ? value : null;
+        } catch { return null; }
+    }
+
+    function pagingPlan(state) {
+        const vm = state.vm, query = vm.$route.query, key = pagingKey(vm);
+        const memory = state.startup ? readPaging(key) : null;
+        const explicitPage = positiveNumber(query.page);
+        const previous = state.lastPlan;
+        const size = positiveNumber(query.pageSize, 800) ||
+            (previous?.key === key && previous.route === vm.$route.fullPath ? previous.size : memory?.pageSize || 50);
+        const anchor = String(query.anchor || '');
+        const sizeChanged = previous?.key === key && previous.size !== size;
+        const reloading = page.performance?.getEntriesByType?.('navigation')?.[0]?.type === 'reload';
+        // 新的定位链接照常打开；刷新同一链接时，恢复上次实际所在页。
+        const restore = !explicitPage && !sizeChanged && memory &&
+            (!anchor || (reloading && anchor === memory.anchor));
+        let current = explicitPage || (sizeChanged ? 1 : restore ? memory.page :
+            previous?.key === key && previous.route === vm.$route.fullPath ? previous.current : anchor ? null : 1);
+        if (restore && Number.isSafeInteger(vm.strings?.rowCount) && vm.strings.rowCount >= 0) {
+            current = Math.min(current, Math.max(1, Math.ceil(vm.strings.rowCount / size)));
+        }
+        const overrides = { pageSize: size };
+        if (current) {
+            overrides.page = current;
+            overrides.anchor = undefined;
+        }
+        return { key, size, current, anchor, overrides, route: vm.$route.fullPath };
+    }
+
+    function pagingRouteChanged(state) {
+        if (state.route !== state.vm.$route.fullPath) {
+            state.route = state.vm.$route.fullPath;
+            state.startup = false;
+            state.mismatchSince = null;
+            state.retried = false;
+        }
+    }
+
+    function detachPaging() {
+        if (!paging) return;
+        if (paging.vm.fetchStrings === paging.wrapper) paging.vm.fetchStrings = paging.original;
+        for (const unwatch of paging.unwatch) unwatch();
+        paging = null;
+    }
+
+    function syncPaging() {
+        const vm = /^\/projects\/\d+\/strings\/?$/.test(page.location.pathname) ? pagingVM() : null;
+        if (paging && paging.vm !== vm) detachPaging();
+        if (!vm || vm.$route.query.id) {
+            detachPaging();
+            return;
+        }
+        if (!paging) {
+            const state = { vm, original: vm.fetchStrings, route: vm.$route.fullPath,
+                startup: true, lastPlan: null, mismatchSince: null, retried: false, unwatch: [] };
+            state.wrapper = function(extra = {}) {
+                pagingRouteChanged(state);
+                // 让网站按正确页码读取真实列表，使用网站原有的请求工具。
+                const plan = pagingPlan(state);
+                state.lastPlan = plan;
+                return state.original.call(this, { ...plan.overrides, ...extra });
+            };
+            paging = state;
+            vm.fetchStrings = state.wrapper;
+            for (const field of ['$route.fullPath', 'loadStatus', 'strings']) {
+                state.unwatch.push(vm.$watch(field, schedule));
+            }
+            vm.$once?.('hook:beforeDestroy', () => { if (paging === state) detachPaging(); });
+        }
+        const state = paging;
+        pagingRouteChanged(state);
+        const plan = pagingPlan(state);
+        const data = vm.strings;
+        if (vm.loading || !Array.isArray(data?.results)) return;
+        const actualPage = positiveNumber(data.page), actualSize = positiveNumber(data.pageSize, 800);
+        const mismatch = !actualPage || actualSize !== plan.size || (plan.current && actualPage !== plan.current);
+        if (mismatch) {
+            state.mismatchSince ??= Date.now();
+            const editor = editorVM();
+            // 不刷新用户正在修改的草稿；同一次加载异常最多补读一次。
+            if (!state.retried && Date.now() - state.mismatchSince >= 1200 &&
+                !pending && !editor?.canSave && !editor?.saving) {
+                state.retried = true;
+                Promise.resolve().then(async () => {
+                    if (paging !== state || state.route !== vm.$route.fullPath || vm.loading) return;
+                    const activeEditor = editorVM();
+                    if (pending || activeEditor?.canSave || activeEditor?.saving) {
+                        state.retried = false;
+                        return;
+                    }
+                    const active = vm.active, requestId = vm._StringsReqId, route = vm.$route.fullPath;
+                    const result = await vm.fetchStrings();
+                    // 读取期间切页、换词条或开始写草稿时，保留当前工作，不应用旧结果。
+                    const currentEditor = editorVM();
+                    if (paging !== state || route !== vm.$route.fullPath || vm.loading ||
+                        vm._StringsReqId !== requestId || vm.active !== active || pending ||
+                        currentEditor?.canSave || currentEditor?.saving) return;
+                    if (!Array.isArray(result?.results)) return;
+                    vm.strings = result;
+                    vm.onLoad?.();
+                }).catch(error => console.warn('ParaTranz-tools：分页重新读取失败', error?.message)).finally(schedule);
+            }
+            return;
+        }
+        state.startup = false;
+        if (!plan.current) plan.current = actualPage;
+        state.lastPlan = plan;
+        state.mismatchSince = null;
+        try {
+            page.localStorage.setItem(plan.key, JSON.stringify({
+                page: actualPage, pageSize: actualSize, anchor: plan.anchor
+            }));
+        } catch { /* 浏览器不允许存储时，分页仍可正常操作。 */ }
+    }
 
     // ===== 启动与页面切换 =====
     new page.MutationObserver(schedule).observe(doc.body, { childList: true, subtree: true, characterData: true });

@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ParaTranz 直接标记已审核
+// @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.2.3
-// @description  增加空译文审核和“保存并检查”（管理员可用），修复注释 @ 候选人点击时失焦导致补全失败。
+// @version      1.3.0
+// @description  空译文审核、保存并检查、注释 @ 补全修复，以及分页加载修复与页码记忆。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
 // @run-at       document-idle
