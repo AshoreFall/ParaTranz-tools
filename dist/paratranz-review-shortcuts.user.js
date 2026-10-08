@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.5.5
-// @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
+// @version      1.6.0
+// @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，代码术语和格式标签的悬浮说明，以及插件管理页。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
 // @run-at       document-start
@@ -13,7 +13,7 @@
 (() => {
     'use strict';
 
-    // 功能：检查/审核、空译文保存、保存菜单、注释 @ 补全、代码悬浮说明、分页修复与页码记忆。
+    // 功能：检查/审核、空译文保存、保存菜单、注释 @ 补全、代码悬浮说明、分页修复与页码记忆。插件管理在文件末尾。
     // 修改功能时，找到下面对应的中文注释即可。
     // ===== 运行状态 =====
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -305,6 +305,9 @@
 
     function sync() {
         scheduled = false;
+        // 管理页使用同一个页面刷新入口；它出错时仍保留编辑器的正常保存。
+        try { page.ParaTranzPluginManager?.sync?.(); }
+        catch (error) { console.warn('ParaTranz-tools：插件页刷新失败', error?.message); }
         syncPaging();
         rememberPagingURL();
         syncEmptySaving();
@@ -915,4 +918,438 @@
         if (event.target?.closest?.('.string-editor')) syncOrdinarySaving();
     });
 
+})();
+
+// ===== 功能：插件管理页、自动发现、项目规则与更新提示 =====
+(() => {
+    'use strict';
+    const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const doc = page.document;
+    const KEY = 'paratranz-tools.plugins.v1';
+    const nativeLabel = /^(建议|Suggestions?|历史|History|术语\s*\d*|Terms?\s*\d*|注释\s*\d*|Notes?\s*\d*)$/i;
+    const clients = new Map(), updates = new Map();
+    let store;
+    try { store = JSON.parse(page.localStorage.getItem(KEY)); } catch { /* 首次使用 */ }
+    if (!store || typeof store !== 'object' || Array.isArray(store)) store = {};
+    let mounted = null, queued = false, activating = false, signature = '', selected = null, opened = false;
+    let scope = 'project', currentContext = '', observer = null;
+    const sourceItems = new Set(), masked = new Set(), nativeActive = new Set();
+    const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
+    const validId = id => typeof id === 'string' && id.length > 0 && id.length < 200 &&
+        !['__proto__', 'prototype', 'constructor', 'ParaTranz-tools'].includes(id);
+    const clone = value => JSON.parse(JSON.stringify(value || {}));
+    function context() {
+        const projectId = /^\/projects\/(\d+)\/strings\/?$/.exec(page.location.pathname)?.[1] || '';
+        let vm = doc.querySelector('.string-editor')?.__vue__, userId = '0';
+        for (let i = 0; vm && i < 16; i++, vm = vm.$parent) {
+            if (vm.$uid) { userId = String(vm.$uid); break; }
+        }
+        return { projectId, userId };
+    }
+    function userStore() {
+        const { userId } = context();
+        if (!own(store, userId) || !store[userId]?.global || !store[userId]?.projects) {
+            store[userId] = { global: {}, projects: {} };
+        }
+        return store[userId];
+    }
+    // ---- 按项目保存规则 ----
+    function rule(id, projectId = context().projectId) {
+        const data = userStore(), global = own(data.global, id) ? data.global[id] : {};
+        const project = own(data.projects, projectId) && own(data.projects[projectId], id) ? data.projects[projectId][id] : {};
+        return { enabled: global.enabled !== false && project.excluded !== true,
+            collect: project.collect ?? global.collect ?? true,
+            config: clone(project.independent ? project.config : global.config),
+            independent: project.independent === true, excluded: project.excluded === true };
+    }
+    function persist() { page.localStorage.setItem(KEY, JSON.stringify(store)); }
+    function queue() {
+        if (queued) return;
+        queued = true;
+        page.requestAnimationFrame(() => { queued = false; sync(); });
+    }
+    // ---- 自动识别额外页签 ----
+    function controls(nav) {
+        return [...nav.children].flatMap(item => {
+            const tab = item.matches?.('.nav-link,[role="tab"]') ? item : item.querySelector?.('.nav-link,[role="tab"]');
+            const title = tab?.textContent.trim();
+            if (!title || nativeLabel.test(title) || /^ParaTranz-tools$/i.test(title) || tab.closest('[data-pz-plugin-manager]')) return [];
+            const panelId = tab.getAttribute('aria-controls') || (tab.getAttribute('href')?.startsWith('#') ? tab.getAttribute('href').slice(1) : '');
+            const panel = panelId ? doc.getElementById(panelId) : null;
+            const sorcery = tab.__sorceryTabController;
+            const metadata = sorcery ? page.SorceryParaTranzReviewBundle : null;
+            return [{ id: tab.getAttribute('data-plugin-id') || tab.id || `tab:${title}`, title, item, tab,
+                panel: panel && mounted.sidebar.contains(panel) ? panel : null,
+                version: tab.getAttribute('data-plugin-version') || metadata?.VERSION || '',
+                updateURL: tab.getAttribute('data-plugin-update-url') || '',
+                homepage: metadata?.UPDATE_URL || '' }];
+        });
+    }
+    function entries() {
+        if (!mounted) return [];
+        const found = controls(mounted.nav), result = new Map();
+        for (const entry of found) if (validId(entry.id)) result.set(entry.id, entry);
+        for (const [id, client] of clients) {
+            const auto = found.find(entry => entry.tab === client.tab || entry.id === id || entry.title === client.title);
+            if (auto) result.delete(auto.id);
+            result.set(id, { ...auto, ...client, id, client,
+                tab: client.tab?.isConnected ? client.tab : auto?.tab,
+                panel: client.panel?.isConnected ? client.panel : auto?.panel });
+        }
+        return [...result.values()];
+    }
+    function fieldSchema(entry) {
+        // 注册接口只接收明确声明的普通设置；密钥保留在各插件自己的设置里。
+        return (Array.isArray(entry.fields) ? entry.fields : []).filter(field => field && validId(field.key) &&
+            /^[a-zA-Z][\w.-]*$/.test(field.key) && !/token|secret|password|api.?key|authorization/i.test(field.key) &&
+            ['boolean', 'number', 'string', 'select'].includes(field.type));
+    }
+    function effective(entry) {
+        const state = rule(entry.id), values = {};
+        for (const field of fieldSchema(entry)) values[field.key] = own(state.config, field.key) ? state.config[field.key] : field.default;
+        return { ...state, config: values, ...context() };
+    }
+    // ---- 应用插件的启停和配置 ----
+    function apply(entry, state = effective(entry)) {
+        if (!entry.client) return Promise.resolve();
+        const client = entry.client, stamp = JSON.stringify(state);
+        if (client.applied === stamp) return Promise.resolve();
+        if (client.applying === stamp) return client.task;
+        const ctx = { projectId: state.projectId, userId: state.userId };
+        client.applying = stamp;
+        client.task = (client.task || Promise.resolve()).catch(() => {}).then(async () => {
+            if (typeof entry.setEnabled === 'function') await entry.setEnabled(state.enabled, ctx);
+            if (state.enabled && typeof entry.applyConfig === 'function') await entry.applyConfig(clone(state.config), ctx);
+            client.applied = stamp;client.failed = '';
+        }).catch(error => { client.failed = stamp;throw error; }).finally(() => {
+            if (client.applying === stamp) client.applying = '';
+            queue();
+        });
+        return client.task;
+    }
+    async function change(entry, patch) {
+        const data = userStore(), { projectId } = context();
+        const area = scope === 'global' ? data.global : (data.projects[projectId] ||= {});
+        const previous = own(area, entry.id) ? clone(area[entry.id]) : undefined;
+        area[entry.id] = { ...(previous || {}), ...patch };
+        try {
+            await apply(entry);
+            persist();
+            signature = '';
+            queue();
+        } catch (error) {
+            if (previous) area[entry.id] = previous; else delete area[entry.id];
+            if (entry.client) { entry.client.applied = '';entry.client.failed = ''; }
+            await apply(entry).catch(() => {});
+            status(error?.message || '设置未能应用，请重试');
+            signature = '';queue();return false;
+        }
+        return true;
+    }
+    function status(message) { if (mounted) mounted.status.textContent = message; }
+    function node(tag, text, className) {
+        const element = doc.createElement(tag);
+        if (text != null) element.textContent = text;
+        if (className) element.className = className;
+        return element;
+    }
+    function button(text, action) {
+        const element = node('button', text, 'btn btn-sm btn-outline-primary');
+        element.type = 'button';
+        element.addEventListener('click', action);
+        return element;
+    }
+    function toggle(text, checked, action, available = true) {
+        const label = node('label'), input = node('input'); input.type = 'checkbox';
+        input.checked = checked; input.disabled = !available;
+        input.addEventListener('change', async () => {
+            const previous = checked;
+            input.disabled = true;
+            try { if (await action(input.checked) === false) input.checked = previous; }
+            catch (error) { input.checked = previous;status(error?.message || '设置保存失败'); }
+            finally { input.disabled = !available; }
+        });
+        label.append(input, doc.createTextNode(' ' + text));
+        return label;
+    }
+    function paneRoots() {
+        if (!mounted) return [];
+        const roots = [...(mounted.sidebar.querySelector('.tabs')?.children || [])];
+        for (const entry of entries()) if (entry.panel && !roots.some(root => root.contains(entry.panel))) roots.push(entry.panel);
+        return roots.filter(root => root !== mounted.root && !root.contains(mounted.root));
+    }
+    function unmask() { for (const root of masked) root.removeAttribute('data-pz-plugin-masked'); masked.clear(); }
+    function restoreActive() {
+        for (const link of nativeActive) if (link.isConnected) link.classList.add('active');
+        nativeActive.clear();
+    }
+    function hideNativeActive() {
+        if (!mounted) return;
+        for (const link of mounted.nav.querySelectorAll('.nav-link.active')) {
+            if (nativeLabel.test(link.textContent.trim())) { nativeActive.add(link);link.classList.remove('active'); }
+        }
+    }
+    function mask() {
+        if (!opened) { unmask();return; }
+        const active = selected && entries().find(entry => entry.id === selected);
+        // 未声明关联面板的旧插件由其原生点击处理控制内容，不猜测、搬动 Vue 节点。
+        if (active && !active.panel) { unmask();return; }
+        const next = new Set();
+        for (const root of paneRoots()) {
+            if (active?.panel && (root === active.panel || root.contains(active.panel))) continue;
+            next.add(root);
+        }
+        for (const root of masked) if (!next.has(root)) root.removeAttribute('data-pz-plugin-masked');
+        for (const root of next) if (!masked.has(root)) root.setAttribute('data-pz-plugin-masked', '');
+        masked.clear();for (const root of next) masked.add(root);
+    }
+    function close() {
+        opened = false; selected = null; unmask();restoreActive();
+        if (mounted) { mounted.root.hidden = true; mounted.tab.classList.remove('active');mounted.tab.setAttribute('aria-selected', 'false'); }
+    }
+    function show() {
+        opened = true; selected = null; signature = '';
+        if (mounted) { mounted.root.hidden = false; mounted.tab.classList.add('active'); }
+        sync();
+    }
+    async function openEntry(entry, configure = false) {
+        // 卡片仍在时，页面可能已经换过一次节点；始终使用当前入口。
+        entry = entries().find(item => item.id === entry.id) || entry;
+        if (!configure && typeof entry.setEnabled === 'function' && !rule(entry.id).enabled) {
+            status('这个插件已停用，请先启用。');return;
+        }
+        opened = true; selected = entry.id; unmask();
+        try {
+            activating = true;
+            if (typeof entry.open === 'function') await entry.open({ ...context() });
+            else if (entry.tab?.isConnected) entry.tab.click();
+            else throw new Error('插件入口暂未加载，请稍后再试');
+        } catch (error) { status(error?.message || '无法打开插件'); }
+        finally { activating = false; }
+        page.requestAnimationFrame(async () => {
+            if (!mounted || !opened || selected !== entry.id) return;
+            const active = entries().find(item => item.id === entry.id) || entry;
+            if (configure) {
+                if (typeof active.configure === 'function') {
+                    try { await active.configure({ ...context() }); } catch (error) { status(error?.message || '无法打开配置'); }
+                }
+                else {
+                    const settings = [...(active.panel?.querySelectorAll('button,a,[role="button"]') || [])].find(control =>
+                        /^(设置|配置(?:翻译)?|Settings|Configuration|Configure)$/i.test(control.textContent.trim()) ||
+                        /^(设置|配置|Settings)$/i.test(control.getAttribute('title') || control.getAttribute('aria-label') || ''));
+                    if (settings) settings.click();
+                    else status('已打开插件，请使用它自己的配置入口。');
+                }
+            }
+            signature = ''; sync();
+        });
+    }
+    // ---- 版本检查和更新提示 ----
+    function safeURL(value) {
+        try {
+            const url = new page.URL(value);
+            if (url.protocol !== 'https:' || url.username || url.password || [...url.searchParams.keys()].some(key => /token|key|password|secret/i.test(key))) return '';
+            return url.href;
+        } catch { return ''; }
+    }
+    function compareVersions(left, right) {
+        const parse = value => /^(?:v)?(\d+(?:\.\d+)*)(?:-([\w.-]+))?(?:\+[\w.-]+)?$/.exec(String(value));
+        const a = parse(left), b = parse(right); if (!a || !b) return null;
+        const x = a[1].split('.').map(Number), y = b[1].split('.').map(Number);
+        for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0) ? 1 : -1;
+        if (!a[2] && b[2]) return 1; if (a[2] && !b[2]) return -1;
+        if (a[2] === b[2]) return 0;
+        return a[2].localeCompare(b[2], 'en', { numeric: true }) > 0 ? 1 : -1;
+    }
+    async function checkUpdate(entry) {
+        entry = entries().find(item => item.id === entry.id) || entry;
+        const url = safeURL(entry.updateURL);
+        if (!url || !entry.version) return;
+        const previous = updates.get(entry.id);
+        if (previous?.pending) return;
+        const metadataKey = JSON.stringify([entry.version, url, entry.metadataName]);
+        updates.set(entry.id, { pending: true, metadataKey, message: '正在检查更新…' }); signature = ''; queue();
+        const controller = new page.AbortController(), timeout = page.setTimeout(() => controller.abort(), 8000);
+        try {
+            const response = await page.fetch(url, { credentials: 'omit', signal: controller.signal });
+            if (!response.ok) throw new Error('无法读取更新信息');
+            const source = await response.text();
+            if (updates.get(entry.id)?.metadataKey !== metadataKey) return;
+            const version = /^\s*\/\/\s*@version\s+(\S+)/m.exec(source)?.[1];
+            const name = /^\s*\/\/\s*@name\s+(.+)/m.exec(source)?.[1]?.trim();
+            if (!version || (entry.metadataName && name !== entry.metadataName)) throw new Error('更新文件与插件信息不符');
+            const comparison = compareVersions(version, entry.version);
+            if (comparison == null) throw new Error('暂时无法比较这个版本号');
+            const download = safeURL(entry.downloadURL || /^\s*\/\/\s*@downloadURL\s+(\S+)/m.exec(source)?.[1] || (/\.user\.js(?:\?|$)/.test(url) ? url : ''));
+            updates.set(entry.id, { version, download, metadataKey, available: comparison > 0,
+                message: comparison > 0 ? `有更新：${version}` : '已是最新版本', checkedAt: Date.now() });
+        } catch (error) {
+            if (updates.get(entry.id)?.metadataKey === metadataKey) updates.set(entry.id, { metadataKey, message: error?.message || '更新检查失败，可稍后重试' });
+        }
+        finally { page.clearTimeout(timeout); signature = ''; queue(); }
+    }
+    // ---- 插件管理页 ----
+    function renderCard(entry) {
+        const card = node('article', null, 'pz-plugin-card'), current = rule(entry.id), schema = fieldSchema(entry);
+        const global = userStore().global[entry.id] || {};
+        const state = scope === 'global' ? { ...current, enabled: global.enabled !== false, collect: global.collect !== false } : current;
+        const head = node('div', null, 'pz-plugin-card-head');
+        head.append(node('strong', entry.title), node('span', entry.version ? `v${entry.version}` : '版本未提供', 'text-muted'));
+        card.append(head);
+        const actions = node('div', null, 'pz-plugin-actions');
+        actions.append(button('打开', () => openEntry(entry)), button('配置', () => openEntry(entry, true)));
+        const update = button('检查更新', () => checkUpdate(entry));
+        update.disabled = !safeURL(entry.updateURL) || !entry.version || !!updates.get(entry.id)?.pending;
+        actions.append(update);
+        const updateState = updates.get(entry.id);
+        if (updateState?.available && updateState.download) {
+            const link = node('a', '更新', 'btn btn-sm btn-primary');link.href = updateState.download;link.target = '_blank';link.rel = 'noopener noreferrer';actions.append(link);
+        } else if (safeURL(entry.homepage) && !entry.updateURL) {
+            const link = node('a', '查看作者更新入口', 'btn btn-sm btn-outline-secondary');link.href = safeURL(entry.homepage);link.target = '_blank';link.rel = 'noopener noreferrer';actions.append(link);
+        }
+        card.append(actions, node('p', updateState?.message || (entry.updateURL ? '可检查更新' : '插件未提供自动更新信息'), 'pz-plugin-update'));
+        const rules = node('div', null, 'pz-plugin-rules');
+        rules.append(toggle('收进插件页', state.collect, value => change(entry, { collect: value })));
+        const canControl = typeof entry.setEnabled === 'function';
+        rules.append(scope === 'project'
+            ? toggle('排除本项目', state.excluded, value => change(entry, { excluded: value }), canControl)
+            : toggle('启用插件', state.enabled, value => change(entry, { enabled: value }), canControl));
+        const canConfigure = typeof entry.applyConfig === 'function' && schema.length > 0;
+        if (scope === 'project') rules.append(toggle('本项目独立设置', state.independent, value =>
+            change(entry, { independent: value, config: value ? clone(effective(entry).config) : state.config }), canConfigure));
+        card.append(rules);
+        if (!canControl || !canConfigure) card.append(node('p',
+            '已识别页面入口。项目停用和独立设置需要插件支持；收纳不会停止脚本运行。', 'text-muted pz-plugin-note'));
+        if (entry.client?.failed) card.append(node('p', '设置应用失败，未确认运行状态。', 'pz-plugin-note'));
+        if (canConfigure && (scope === 'global' || state.independent)) {
+            const values = scope === 'global' ? Object.fromEntries(schema.map(field =>
+                [field.key, own(global.config, field.key) ? global.config[field.key] : field.default])) : effective(entry).config;
+            const ownerContext = JSON.stringify(context());
+            const form = node('div', null, 'pz-plugin-fields');
+            for (const field of schema) {
+                const label = node('label', field.label || field.key), input = node(field.type === 'select' ? 'select' : 'input');
+                if (field.type === 'select') for (const option of field.options || []) {
+                    const item = node('option', typeof option === 'object' ? option.label : option);item.value = typeof option === 'object' ? option.value : option;input.append(item);
+                } else input.type = field.type === 'boolean' ? 'checkbox' : field.type === 'number' ? 'number' : 'text';
+                if (field.type === 'boolean') input.checked = values[field.key] === true;
+                else input.value = String(values[field.key] ?? '');
+                if (field.min != null) input.min = field.min;if (field.max != null) input.max = field.max;
+                input.addEventListener('change', async () => {
+                    if (JSON.stringify(context()) !== ownerContext) { status('项目已变化，请在当前项目重新设置');return; }
+                    const value = field.type === 'boolean' ? input.checked : field.type === 'number' ? Number(input.value) : input.value;
+                    if (field.type === 'number' && (!Number.isFinite(value) || field.min != null && value < field.min || field.max != null && value > field.max)) { status('数值超出可用范围');return; }
+                    const data = userStore(), raw = scope === 'global' ? data.global[entry.id] : data.projects[context().projectId]?.[entry.id];
+                    await change(entry, { config: { ...(raw?.config || values), [field.key]: value } });
+                });
+                label.append(input);form.append(label);
+            }
+            card.append(form);
+        }
+        return card;
+    }
+    function restoreSources() { for (const item of sourceItems) item.removeAttribute('data-pz-plugin-collected');sourceItems.clear(); }
+    function teardown() {
+        restoreSources();unmask();restoreActive();
+        if (mounted) { mounted.nav.removeEventListener('click', mounted.navClick, true);mounted.item.remove();mounted.root.remove(); }
+        mounted = null;signature = '';selected = null;opened = false;
+    }
+    function mount(sidebar, nav) {
+        const item = node('li', null, 'nav-item');item.setAttribute('data-pz-plugin-manager', '');
+        const tab = node('button', '插件', 'nav-link');tab.type = 'button';tab.setAttribute('role', 'tab');tab.setAttribute('aria-selected', 'false');tab.addEventListener('click', show);item.append(tab);
+        const root = node('section', null, 'pz-plugin-manager');root.setAttribute('data-pz-plugin-manager', '');root.hidden = true;
+        const toolbar = node('div', null, 'pz-plugin-toolbar'), selector = node('select');
+        for (const [value, label] of [['project', `项目 ${context().projectId}`], ['global', '全局设置']]) { const option = node('option', label);option.value = value;selector.append(option); }
+        selector.value = scope;selector.addEventListener('change', () => { scope = selector.value;signature = '';queue(); });
+        const checkAll = button('检查更新', () => { for (const entry of entries()) checkUpdate(entry); });
+        toolbar.append(selector, checkAll, button('返回插件列表', show));
+        const message = node('p', '', 'pz-plugin-status'), list = node('div', null, 'pz-plugin-list');root.append(toolbar, message, list);
+        const navClick = event => {
+            const link = event.target?.closest?.('.nav-link,[role="tab"]');
+            if (opened && !activating && link && link !== tab && nav.contains(link)) close();
+        };
+        nav.addEventListener('click', navClick, true);nav.append(item);nav.after(root);
+        mounted = { sidebar, nav, item, tab, root, list, status: message, navClick, selector };
+        if (!doc.getElementById('pz-plugin-manager-style')) {
+            const style = node('style');style.id = 'pz-plugin-manager-style';style.textContent =
+                '[data-pz-plugin-collected],[data-pz-plugin-masked]{display:none!important}.pz-plugin-manager[hidden]{display:none!important}' +
+                '[data-pz-plugin-manager]>.nav-link{width:100%;border:0;cursor:pointer;background:transparent}' +
+                '.pz-plugin-manager{margin-top:12px;color:inherit}.pz-plugin-toolbar,.pz-plugin-actions,.pz-plugin-rules{display:flex;align-items:center;flex-wrap:wrap;gap:8px}' +
+                '.pz-plugin-toolbar{margin-bottom:12px}.pz-plugin-toolbar select{padding:5px;border:1px solid #adb5bd;border-radius:6px;background:transparent;color:inherit}' +
+                '.pz-plugin-card{padding:14px;margin:0 0 12px;border:1px solid #adb5bd66;border-radius:8px}.pz-plugin-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}' +
+                '.pz-plugin-rules{gap:14px}.pz-plugin-rules label{margin:0}.pz-plugin-note,.pz-plugin-update,.pz-plugin-status{font-size:.875em;margin:8px 0}.pz-plugin-fields{display:grid;gap:8px;margin-top:12px}' +
+                '.pz-plugin-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px}.pz-plugin-fields input:not([type=checkbox]),.pz-plugin-fields select{max-width:55%;border:1px solid #adb5bd;border-radius:4px;padding:4px;background:transparent;color:inherit}';
+            doc.head?.append(style);
+        }
+    }
+    function sync() {
+        const ctx = context(), key = `${ctx.userId}:${ctx.projectId}`;
+        if (key !== currentContext) { close();scope = 'project';currentContext = key;signature = ''; }
+        const sidebar = ctx.projectId && doc.querySelector('.sidebar-right');
+        const nav = sidebar && [...(sidebar.children || [])].find(element => element.classList.contains('nav') &&
+            [...element.querySelectorAll('.nav-link')].some(link => nativeLabel.test(link.textContent.trim())));
+        if (mounted && (!mounted.item.isConnected || !mounted.root.isConnected || mounted.nav !== nav)) teardown();
+        if (!nav) return;
+        if (!mounted) mount(sidebar, nav);
+        if (mounted.selector.value !== scope) mounted.selector.value = scope;
+        const projectOption = mounted.selector.children[0];
+        if (projectOption.textContent !== `项目 ${ctx.projectId}`) projectOption.textContent = `项目 ${ctx.projectId}`;
+        const list = entries(), nextSources = new Set();
+        for (const entry of list) {
+            const previousUpdate = updates.get(entry.id);
+            if (previousUpdate && previousUpdate.metadataKey !== JSON.stringify([entry.version, safeURL(entry.updateURL), entry.metadataName])) updates.delete(entry.id);
+            if (entry.item && rule(entry.id).collect) nextSources.add(entry.item);
+            if (entry.client) {
+                const state = JSON.stringify(effective(entry));
+                if (entry.client.applied !== state && !entry.client.applying && entry.client.failed !== state)
+                    apply(entry).catch(error => status(error?.message || '插件设置未能应用'));
+            }
+        }
+        for (const item of sourceItems) if (!nextSources.has(item)) item.removeAttribute('data-pz-plugin-collected');
+        for (const item of nextSources) if (!sourceItems.has(item)) item.setAttribute('data-pz-plugin-collected', '');
+        sourceItems.clear();for (const item of nextSources) sourceItems.add(item);
+        mounted.root.hidden = !opened;
+        if (opened) {
+            if (selected && !list.some(entry => entry.id === selected)) { selected = null;signature = ''; }
+            mounted.tab.classList.add('active');
+            if (mounted.tab.getAttribute('aria-selected') !== 'true') mounted.tab.setAttribute('aria-selected', 'true');
+            hideNativeActive();mask();
+            for (const entry of list) if (safeURL(entry.updateURL) && entry.version && !updates.has(entry.id)) checkUpdate(entry);
+            const count = list.filter(entry => updates.get(entry.id)?.available).length;
+            const label = count ? `插件 · ${count}` : '插件';if (mounted.tab.textContent !== label) mounted.tab.textContent = label;
+            const view = selected ? list.filter(entry => entry.id === selected) : list;
+            const next = JSON.stringify([scope, selected, view.map(entry => [entry.id, entry.title, entry.version, rule(entry.id), entry.client?.failed, updates.get(entry.id)])]);
+            const editingField = mounted.list.contains(doc.activeElement) && doc.activeElement?.closest?.('.pz-plugin-fields');
+            if (signature !== next && !editingField) {
+                signature = next;mounted.list.replaceChildren(...view.map(renderCard));
+                if (!view.length) mounted.list.append(node('p', '当前页面还没有检测到插件入口。'));
+            }
+        }
+    }
+    // 其他脚本可通过 register 接入。setEnabled 负责真正启停，applyConfig 接收当前项目设置。
+    // 没有接入的脚本仍可自动收纳入口，但不会被冒充为支持启停或独立配置。
+    // 先检查 window.ParaTranzPluginManager；若尚未加载，监听 paratranz-tools:plugins-ready。
+    const api = {
+        owner: 'ParaTranz-tools', version: '1.6.0', sync,
+        register(descriptor) {
+            if (!descriptor || !validId(descriptor.id) || !descriptor.title || /^ParaTranz-tools$/i.test(descriptor.title)) throw new Error('插件信息不完整');
+            if (clients.get(descriptor.id)?.version !== descriptor.version) updates.delete(descriptor.id);
+            const client = { ...descriptor, applied: '', applying: '', failed: '' };clients.set(client.id, client);signature = '';queue();
+            return () => { if (clients.get(client.id) === client) { clients.delete(client.id);signature = '';queue(); } };
+        },
+        isEnabled(id, projectId) { return validId(id) && rule(id, String(projectId || context().projectId)).enabled; },
+        getConfig(id) { return validId(id) ? clone(rule(id).config) : {}; },
+        list() { return entries().map(entry => ({ id: entry.id, title: entry.title, version: entry.version || '',
+            canControl: typeof entry.setEnabled === 'function', canConfigure: typeof entry.applyConfig === 'function', ...rule(entry.id) })); },
+        open: show,
+        destroy() { teardown();observer?.disconnect();doc.removeEventListener('focusout', queue);if (page.ParaTranzPluginManager === api) delete page.ParaTranzPluginManager; },
+        compareVersions
+    };
+    page.ParaTranzPluginManager = api;
+    if (page.CustomEvent && page.dispatchEvent) page.dispatchEvent(new page.CustomEvent('paratranz-tools:plugins-ready', { detail: api }));
+    function start() {
+        observer = new page.MutationObserver(queue);observer.observe(doc.body, { childList: true, subtree: true });
+        // 页面切换由主脚本已有的轮询调用 sync；不再另开定时器。
+        doc.addEventListener('focusout', queue);sync();
+    }
+    if (doc.body) start();else doc.addEventListener('DOMContentLoaded', start, { once: true });
 })();
