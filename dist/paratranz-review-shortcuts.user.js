@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.5.1
+// @version      1.5.2
 // @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
@@ -190,7 +190,7 @@
         return button.closest('li');
     }
 
-    // ===== 功能：蓝标显示浅绿色“检查”，笑脸显示绿色“审核” =====
+    // ===== 功能：蓝标显示“检查”，主按钮保留网站的审核权限限制 =====
     function mainLabel(button, text) {
         // 只改文字节点，保留网站按钮和图标上的绑定。
         for (const node of button.childNodes) {
@@ -205,8 +205,7 @@
         if (!mainControl) return;
         const control = mainControl;
         control.button.removeEventListener('click', control.handler, true);
-        control.icon.remove();
-        for (const [icon, display] of control.icons) icon.style.display = display;
+        control.button.removeAttribute('data-pz-main-action');
         for (const [element, styles] of control.styles) {
             for (const [property, value, priority] of styles) {
                 if (value) element.style.setProperty(property, value, priority);
@@ -228,8 +227,9 @@
         const button = [...(dropdown?.parentElement?.children || [])].find(el =>
             el.tagName === 'BUTTON' && el.classList.contains('btn'));
         const stage = Number(vm.item.stage);
-        const target = stage === 3 ? 5 : stage > 0 && stage < 3 ? 3 : null;
-        if (mainControl && (mainControl.button !== button || vm.canSave || !target || !vm.canEdit)) restoreMainButton();
+        // 自己检查过、网站不允许继续审核时，恢复原生“保存”。直接审核只在小箭头菜单里。
+        const target = !vm.canReview ? null : stage === 3 ? 5 : stage > 0 && stage < 3 ? 3 : null;
+        if (mainControl && (mainControl.vm !== vm || mainControl.button !== button || vm.canSave || !target || !vm.canEdit)) restoreMainButton();
         if (!button || vm.canSave || !target || !vm.canEdit) return;
         const toggle = dropdown.querySelector('button.dropdown-toggle');
         if (!mainControl) {
@@ -237,21 +237,27 @@
                 event.preventDefault();
                 event.stopImmediatePropagation();
                 const current = editorVM(), currentStage = Number(current?.item?.stage);
-                if (current !== vm || current.canSave || pending || current.saving || !allowed(current)) return;
+                if (current !== vm || current.canSave || !current.canReview || pending || current.saving || !allowed(current)) return;
                 if (currentStage === 3) setCurrentStage(5);
                 else if (currentStage > 0 && currentStage < 3) setCurrentStage(3);
             };
-            const icon = doc.createElement('span');
-            icon.setAttribute('aria-hidden', 'true');
-            icon.style.marginRight = '.35em';
+            // 不往 Vue 管理的按钮内部插入图标，避免切换“审核/保存”时图标叠在一起。
+            if (doc.head && !doc.getElementById('pz-main-action-style')) {
+                const style = doc.createElement('style');
+                style.id = 'pz-main-action-style';
+                style.textContent = '[data-pz-main-action] svg { display: none !important; }' +
+                    '[data-pz-main-action]::before { margin-right: .35em; }' +
+                    '[data-pz-main-action="3"]::before { content: "☺"; }' +
+                    '[data-pz-main-action="5"]::before { content: "✓"; }';
+                doc.head.appendChild(style);
+            }
             const styles = new Map();
             for (const element of [button, toggle].filter(Boolean)) {
                 styles.set(element, ['background-color', 'border-color', 'color'].map(property =>
                     [property, element.style.getPropertyValue(property), element.style.getPropertyPriority(property)]));
             }
-            mainControl = { button, handler, icon, icons: new Map(), styles, vm,
+            mainControl = { button, handler, styles, vm,
                 originalTitle: button.title, english: /\b(Review|Save)\b/.test(button.textContent) };
-            button.insertBefore(icon, button.firstChild);
             button.addEventListener('click', handler, true);
         }
         const text = target === 3 ? '检查' : '审核';
@@ -259,12 +265,7 @@
         mainLabel(button, text);
         button.title = text;
         button.disabled = Boolean(disabledReason(vm));
-        const symbol = target === 3 ? '☺' : '✓';
-        if (mainControl.icon.textContent !== symbol) mainControl.icon.textContent = symbol;
-        for (const icon of button.querySelectorAll('svg')) {
-            if (!mainControl.icons.has(icon)) mainControl.icons.set(icon, icon.style.display);
-            if (icon.style.display !== 'none') icon.style.display = 'none';
-        }
+        if (button.getAttribute('data-pz-main-action') !== String(target)) button.setAttribute('data-pz-main-action', String(target));
         for (const element of mainControl.styles.keys()) {
             for (const [property, value] of [['background-color', color], ['border-color', color], ['color', '#fff']]) {
                 if (element.style.getPropertyValue(property) !== value) element.style.setProperty(property, value, 'important');
@@ -638,10 +639,11 @@
         const anchor = String(query.anchor || '');
         const sizeChanged = previous?.key === key && previous.size !== size;
         const reloading = page.performance?.getEntriesByType?.('navigation')?.[0]?.type === 'reload';
-        // 新的定位链接照常打开；刷新同一链接时，恢复上次实际所在页。
-        const restore = !explicitPage && !sizeChanged && memory &&
-            (!anchor || (reloading && anchor === memory.anchor));
-        let current = explicitPage || (sizeChanged ? 1 : restore ? memory.page :
+        // 刷新时以记住的实际页为准，不能让地址里残留的 page=1 覆盖它。
+        // 新打开的定位链接、手动切页仍按链接和用户选择处理。
+        const restore = !sizeChanged && memory &&
+            (reloading ? anchor === memory.anchor : !explicitPage && !anchor);
+        let current = restore ? memory.page : explicitPage || (sizeChanged ? 1 :
             previous?.key === key && previous.route === vm.$route.fullPath ? previous.current : anchor ? null : 1);
         if (restore && Number.isSafeInteger(vm.strings?.rowCount) && vm.strings.rowCount >= 0) {
             current = Math.min(current, Math.max(1, Math.ceil(vm.strings.rowCount / size)));
@@ -660,7 +662,25 @@
             state.startup = false;
             state.mismatchSince = null;
             state.retried = false;
+            state.routeSync = null;
         }
+    }
+
+    function syncPagingRoute(state, current, size) {
+        const vm = state.vm, query = vm.$route.query;
+        // 网站页码优先读取地址栏；只改返回的数据，会出现列表在第 3 页、页码仍为 1。
+        if ((positiveNumber(query.page) || 1) === current &&
+            (positiveNumber(query.pageSize, 800) || 50) === size) return;
+        if (typeof vm.$router?.replace !== 'function' || state.routeSync === vm.$route.fullPath) return;
+        const editor = editorVM();
+        if (pending || vm.loading || editor?.canSave || editor?.saving) return;
+        const next = { ...query, page: String(current), pageSize: String(size) };
+        // 换地址时仍定位当前词条，避免网站重新加载后选回旧的 anchor。
+        if (vm.strings.results.some(item => Number(item.id) === Number(vm.active))) next.anchor = String(vm.active);
+        else delete next.anchor;
+        state.routeSync = vm.$route.fullPath;
+        Promise.resolve(vm.$router.replace({ path: vm.$route.path, query: next, hash: vm.$route.hash }))
+            .catch(error => console.warn('ParaTranz-tools：分页地址同步失败', error?.message)).finally(schedule);
     }
 
     function detachPaging() {
@@ -679,7 +699,7 @@
         }
         if (!paging) {
             const state = { vm, original: vm.fetchStrings, route: vm.$route.fullPath,
-                startup: true, lastPlan: null, mismatchSince: null, retried: false, unwatch: [] };
+                startup: true, lastPlan: null, mismatchSince: null, retried: false, routeSync: null, unwatch: [] };
             state.wrapper = function(extra = {}) {
                 pagingRouteChanged(state);
                 // 让网站按正确页码读取真实列表，使用网站原有的请求工具。
@@ -738,6 +758,7 @@
                 page: actualPage, pageSize: actualSize, anchor: plan.anchor
             }));
         } catch { /* 浏览器不允许存储时，分页仍可正常操作。 */ }
+        syncPagingRoute(state, actualPage, actualSize);
     }
 
     // ===== 启动与页面切换 =====
