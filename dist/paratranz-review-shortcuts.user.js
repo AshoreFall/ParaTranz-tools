@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.5.0
-// @description  检查与审核、空译文审核、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
+// @version      1.5.1
+// @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
 // @run-at       document-idle
@@ -13,7 +13,7 @@
 (() => {
     'use strict';
 
-    // 功能：检查/审核、保存菜单、注释 @ 补全、代码悬浮说明、分页修复与页码记忆。
+    // 功能：检查/审核、空译文保存、保存菜单、注释 @ 补全、代码悬浮说明、分页修复与页码记忆。
     // 修改功能时，找到下面对应的中文注释即可。
     // ===== 运行状态 =====
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -71,9 +71,10 @@
     }
 
     // ===== 功能：检查与直接审核的提交、服务器结果确认 =====
-    async function setCurrentStage(targetStage, requireSave = false) {
+    async function setCurrentStage(targetStage, requireSave = false, preserveStage = false, sourceVM = null) {
         const vm = editorVM();
-        const reason = disabledReason(vm, requireSave);
+        if (sourceVM && sourceVM !== vm) return;
+        const reason = preserveStage ? emptySaveReason(vm) : disabledReason(vm, requireSave);
         if (reason) {
             tell(vm, 'error', reason);
             return;
@@ -83,7 +84,8 @@
         const translation = vm.translation;
         const stage = Number(vm.item.stage);
         const saveTranslation = Boolean(vm.canSave);
-        const action = targetStage === 3 ? '检查' : '审核';
+        const draftKey = vm.draftKey;
+        const action = preserveStage ? '保存' : targetStage === 3 ? '检查' : '审核';
         pending = true;
         sync();
         let ownsSaving = false;
@@ -93,7 +95,8 @@
             // 允许空译文审核；和网站一样，只检查非空文本。
             if (translation && !await vm.preSaveCheck()) return;
             if (editorVM() !== vm || Number(vm.projectId) !== project || Number(vm.item.id) !== id ||
-                Number(vm.item.stage) !== stage || vm.translation !== translation || !allowed(vm) || !vm.canEdit || vm.saving) {
+                Number(vm.item.stage) !== stage || vm.translation !== translation ||
+                (preserveStage ? Boolean(emptySaveReason(vm, true)) : !allowed(vm)) || !vm.canEdit || vm.saving) {
                 throw new Error('词条或译文已变化，请在当前词条重新操作');
             }
             vm.saving = true;
@@ -129,10 +132,13 @@
             }
             if (sameEditor && vm.translation === translation) {
                 // 当前草稿和选中词条未变化时，才通知网站刷新列表。
+                if (preserveStage && draftKey) vm.$ss?.remove?.(draftKey);
                 vm.$emit('save', result);
-                tell(vm, 'success', `词条已标记为${stageName(targetStage)}（服务器已确认）`);
+                tell(vm, 'success', preserveStage ? `空译文已保存，状态保留为${stageName(targetStage)}（服务器已确认）` :
+                    `词条已标记为${stageName(targetStage)}（服务器已确认）`);
             } else {
-                tell(vm, 'success', `原词条 ${id} 已标记为${stageName(targetStage)}（服务器已确认）；当前编辑内容已保留。`);
+                tell(vm, 'success', preserveStage ? `原词条 ${id} 的空译文已保存，状态保留为${stageName(targetStage)}；当前编辑内容已保留。` :
+                    `原词条 ${id} 已标记为${stageName(targetStage)}（服务器已确认）；当前编辑内容已保留。`);
             }
         } catch (error) {
             tell(vm, 'error', error?.message || '标记失败，请稍后重试');
@@ -269,6 +275,7 @@
     function sync() {
         scheduled = false;
         syncPaging();
+        syncEmptySaving();
         syncCodeHints();
         if (!/^\/projects\/\d+\/strings\/?$/.test(page.location.pathname)) {
             unmount();
@@ -346,6 +353,48 @@
         if (scheduled) return;
         scheduled = true;
         page.requestAnimationFrame(sync);
+    }
+
+    // ===== 功能：普通保存空译文时，保留当前状态 =====
+    let emptySaving = null;
+
+    function emptySaveReason(vm, ownPending = false) {
+        if (!/^\/projects\/\d+\/strings\/?$/.test(page.location.pathname)) return '请先打开词条编辑页面';
+        if ((!ownPending && pending) || vm?.saving) return '正在保存，请稍候';
+        if (!vm?.canEdit) return '当前词条不可编辑或由其他成员编辑中';
+        if (!Number.isSafeInteger(Number(vm.item?.id)) || Number(vm.item.id) <= 0) return '请先选择词条';
+        if (![-1, 0, 1, 2, 3, 5, 9].includes(Number(vm.item.stage))) return '当前词条状态不兼容';
+        if (vm.translation !== '') return '译文已变化，请重新保存';
+        if (!vm.canSave) return '没有需要保存的译文修改';
+        return '';
+    }
+
+    function detachEmptySaving() {
+        if (!emptySaving) return;
+        const { vm, original, wrapper } = emptySaving;
+        emptySaving = null;
+        if (vm.saveItem === wrapper) {
+            vm.saveItem = original;
+            if (!vm._isDestroyed && !vm._isBeingDestroyed) vm.$forceUpdate?.();
+        }
+    }
+
+    function syncEmptySaving() {
+        const vm = /^\/projects\/\d+\/strings\/?$/.test(page.location.pathname) ? editorVM() : null;
+        if (emptySaving && emptySaving.vm !== vm) detachEmptySaving();
+        if (!vm || vm._isDestroyed || vm._isBeingDestroyed || typeof vm.saveItem !== 'function' || emptySaving) return;
+        const state = { vm, original: vm.saveItem };
+        state.wrapper = function(...args) {
+            // 包住原生保存方法，普通按钮和 Ctrl+S / Ctrl+Enter 都能用。
+            if (this.translation !== '') return state.original.apply(this, args);
+            // 保存非空译文仍走网站原来的检查、排版和批量保存流程。
+            // 空译文只保存当前词条，避免改动其他重复词条的状态。
+            return setCurrentStage(Number(this.item?.stage), true, true, this);
+        };
+        emptySaving = state;
+        vm.saveItem = state.wrapper;
+        vm.$once?.('hook:beforeDestroy', () => { if (emptySaving === state) detachEmptySaving(); });
+        vm.$forceUpdate?.();
     }
 
     // ===== 功能：注释 @ 候选人点击补全 =====
