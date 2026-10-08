@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.3.0
-// @description  空译文审核、保存并检查、注释 @ 补全修复，以及分页加载修复与页码记忆。
+// @version      1.5.0
+// @description  检查与审核、空译文审核、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
 // @run-at       document-idle
@@ -13,7 +13,7 @@
 (() => {
     'use strict';
 
-    // 功能：空译文审核、保存并检查、注释 @ 补全、分页加载修复与页码记忆。
+    // 功能：检查/审核、保存菜单、注释 @ 补全、代码悬浮说明、分页修复与页码记忆。
     // 修改功能时，找到下面对应的中文注释即可。
     // ===== 运行状态 =====
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -22,6 +22,8 @@
     let mounted = null;
     let pending = false;
     let scheduled = false;
+    const nativeChecks = new Map();
+    let mainControl = null;
 
     // ===== 编辑器与权限 =====
     function editorVM() {
@@ -39,7 +41,7 @@
         return vm?.isManager === true && (permission === 3 || permission === 10);
     }
 
-    function disabledReason(vm, targetStage = 5) {
+    function disabledReason(vm, requireSave = false) {
         if (pending || vm?.saving) return '正在保存，请稍候';
         if (!allowed(vm)) return '仅项目所有者和管理员可用';
         if (!Number.isSafeInteger(Number(vm.item?.id)) || Number(vm.item.id) <= 0) return '请先选择词条';
@@ -47,7 +49,7 @@
         if (Number(vm.item.stage) === 9) return '请先通过原生菜单解锁词条';
         if (Number(vm.item.stage) === -1) return '请先通过原生菜单取消隐藏';
         if (!vm.canEdit) return '当前词条不可编辑或由其他成员编辑中';
-        if (targetStage === 3 && !vm.canSave) return '没有需要保存的译文修改';
+        if (requireSave && !vm.canSave) return '没有需要保存的译文修改';
         return '';
     }
 
@@ -68,10 +70,10 @@
             3: '已检查', 5: '已审核', 9: '已锁定' })[stage] || `状态 ${stage}`;
     }
 
-    // ===== 功能：空译文审核、保存并检查 =====
-    async function setStage(targetStage) {
+    // ===== 功能：检查与直接审核的提交、服务器结果确认 =====
+    async function setCurrentStage(targetStage, requireSave = false) {
         const vm = editorVM();
-        const reason = disabledReason(vm, targetStage);
+        const reason = disabledReason(vm, requireSave);
         if (reason) {
             tell(vm, 'error', reason);
             return;
@@ -144,13 +146,130 @@
     // ===== 功能：在保存菜单中增加选项 =====
     function unmount() {
         mounted?.li.remove();
-        mounted?.checkLi.remove();
+        mounted?.saveLi.remove();
         mounted = null;
+        for (const [button, control] of nativeChecks) {
+            button.removeEventListener('click', control.handler, true);
+            if (button.textContent === '保存并检查') button.textContent = control.originalLabel;
+        }
+        nativeChecks.clear();
+        restoreMainButton();
+    }
+
+    // ===== 功能：原生保存入口明确为“保存并检查”（笑脸） =====
+    function nativeCheckButton(host) {
+        for (const [button, control] of nativeChecks) {
+            if (!button.isConnected || !host.contains(button)) {
+                button.removeEventListener('click', control.handler, true);
+                nativeChecks.delete(button);
+            }
+        }
+        const button = [...host.querySelectorAll('.dropdown-item')].find(el =>
+            el !== mounted?.saveButton && (nativeChecks.has(el) ||
+                /^(保存并审核|Save and Review)$/.test(el.textContent.trim())));
+        if (!button || typeof editorVM()?.markAs !== 'function') return null;
+        if (!nativeChecks.has(button)) {
+            const handler = event => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                const vm = editorVM();
+                if (!button.isConnected || !allowed(vm) || !vm.canSave || !vm.canReview || vm.saving || pending) return;
+                // 使用页面保存前检查，明确提交“已检查”，与下面的直接审核分开。
+                setCurrentStage(3, true);
+            };
+            nativeChecks.set(button, { originalLabel: button.textContent, handler });
+            button.addEventListener('click', handler, true);
+        }
+        if (button.textContent !== '保存并检查') button.textContent = '保存并检查';
+        return button.closest('li');
+    }
+
+    // ===== 功能：蓝标显示浅绿色“检查”，笑脸显示绿色“审核” =====
+    function mainLabel(button, text) {
+        // 只改文字节点，保留网站按钮和图标上的绑定。
+        for (const node of button.childNodes) {
+            if (node.nodeType === 3 && /^(审核|Review|保存|Save|检查|Check)$/.test(node.nodeValue.trim())) {
+                const next = ' ' + text + ' ';
+                if (node.nodeValue !== next) node.nodeValue = next;
+            }
+        }
+    }
+
+    function restoreMainButton() {
+        if (!mainControl) return;
+        const control = mainControl;
+        control.button.removeEventListener('click', control.handler, true);
+        control.icon.remove();
+        for (const [icon, display] of control.icons) icon.style.display = display;
+        for (const [element, styles] of control.styles) {
+            for (const [property, value, priority] of styles) {
+                if (value) element.style.setProperty(property, value, priority);
+                else element.style.removeProperty(property);
+            }
+        }
+        if (control.button.isConnected) {
+            const vm = control.vm;
+            const nativeReview = vm.canReview && !vm.canSave;
+            mainLabel(control.button, control.english ? (nativeReview ? 'Review' : 'Save') : (nativeReview ? '审核' : '保存'));
+            control.button.disabled = Boolean(vm.saving || (!nativeReview && !vm.canSave));
+            control.button.title = control.originalTitle;
+        }
+        mainControl = null;
+    }
+
+    function syncMainButton(vm, anchor) {
+        const dropdown = anchor.closest('.b-dropdown');
+        const button = [...(dropdown?.parentElement?.children || [])].find(el =>
+            el.tagName === 'BUTTON' && el.classList.contains('btn'));
+        const stage = Number(vm.item.stage);
+        const target = stage === 3 ? 5 : stage > 0 && stage < 3 ? 3 : null;
+        if (mainControl && (mainControl.button !== button || vm.canSave || !target || !vm.canEdit)) restoreMainButton();
+        if (!button || vm.canSave || !target || !vm.canEdit) return;
+        const toggle = dropdown.querySelector('button.dropdown-toggle');
+        if (!mainControl) {
+            const handler = event => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                const current = editorVM(), currentStage = Number(current?.item?.stage);
+                if (current !== vm || current.canSave || pending || current.saving || !allowed(current)) return;
+                if (currentStage === 3) setCurrentStage(5);
+                else if (currentStage > 0 && currentStage < 3) setCurrentStage(3);
+            };
+            const icon = doc.createElement('span');
+            icon.setAttribute('aria-hidden', 'true');
+            icon.style.marginRight = '.35em';
+            const styles = new Map();
+            for (const element of [button, toggle].filter(Boolean)) {
+                styles.set(element, ['background-color', 'border-color', 'color'].map(property =>
+                    [property, element.style.getPropertyValue(property), element.style.getPropertyPriority(property)]));
+            }
+            mainControl = { button, handler, icon, icons: new Map(), styles, vm,
+                originalTitle: button.title, english: /\b(Review|Save)\b/.test(button.textContent) };
+            button.insertBefore(icon, button.firstChild);
+            button.addEventListener('click', handler, true);
+        }
+        const text = target === 3 ? '检查' : '审核';
+        const color = target === 3 ? '#20c997' : '#28a745';
+        mainLabel(button, text);
+        button.title = text;
+        button.disabled = Boolean(disabledReason(vm));
+        const symbol = target === 3 ? '☺' : '✓';
+        if (mainControl.icon.textContent !== symbol) mainControl.icon.textContent = symbol;
+        for (const icon of button.querySelectorAll('svg')) {
+            if (!mainControl.icons.has(icon)) mainControl.icons.set(icon, icon.style.display);
+            if (icon.style.display !== 'none') icon.style.display = 'none';
+        }
+        for (const element of mainControl.styles.keys()) {
+            for (const [property, value] of [['background-color', color], ['border-color', color], ['color', '#fff']]) {
+                if (element.style.getPropertyValue(property) !== value) element.style.setProperty(property, value, 'important');
+            }
+        }
     }
 
     function sync() {
         scheduled = false;
         syncPaging();
+        syncCodeHints();
         if (!/^\/projects\/\d+\/strings\/?$/.test(page.location.pathname)) {
             unmount();
             return;
@@ -168,7 +287,8 @@
             unmount();
             return;
         }
-        if (mounted && (!mounted.li.isConnected || mounted.anchor !== anchor)) unmount();
+        if (mounted && (!mounted.anchor.isConnected || mounted.anchor !== anchor)) unmount();
+        syncMainButton(vm, anchor);
         if (!mounted) {
             // 按网站原有的下拉菜单结构添加按钮。
             const li = doc.createElement('li');
@@ -179,36 +299,43 @@
             button.className = 'dropdown-item';
             button.setAttribute('role', 'menuitem');
             button.textContent = '标记为已审核';
-            button.addEventListener('click', () => setStage(5));
+            button.addEventListener('click', () => setCurrentStage(5));
             li.appendChild(button);
             anchor.before(li);
-            const checkLi = doc.createElement('li');
-            checkLi.id = `${ID}-checked`;
-            checkLi.setAttribute('role', 'presentation');
-            const checkButton = doc.createElement('button');
-            checkButton.type = 'button';
-            checkButton.className = 'dropdown-item';
-            checkButton.setAttribute('role', 'menuitem');
-            checkButton.textContent = '保存并检查';
-            checkButton.addEventListener('click', () => setStage(3));
-            checkLi.appendChild(checkButton);
-            mounted = { li, button, anchor, checkLi, checkButton, checkAnchor: null };
+            const saveLi = doc.createElement('li');
+            saveLi.id = `${ID}-save-reviewed`;
+            saveLi.setAttribute('role', 'presentation');
+            const saveButton = doc.createElement('button');
+            saveButton.type = 'button';
+            saveButton.className = 'dropdown-item';
+            saveButton.setAttribute('role', 'menuitem');
+            saveButton.textContent = '保存并审核';
+            saveButton.addEventListener('click', () => setCurrentStage(5, true));
+            saveLi.appendChild(saveButton);
+            mounted = { li, button, anchor, saveLi, saveButton, saveAnchor: null };
         }
-        // 把“保存并检查”放在“保存并审核”下面。
+        // 上面是笑脸的“保存并检查”，下面是绿色勾的“保存并审核”。
         const items = [...host.querySelectorAll('.dropdown-item')];
-        const saveReview = items.find(el => /^(保存并审核|Save and Review)$/.test(el.textContent.trim()))?.closest('li');
+        const nativeCheck = nativeCheckButton(host);
         const firstStatus = items.find(el => /^(标记为已翻译|标记为有疑问|标记为未翻译|Mark as Translated|Mark as Disputed|Mark as Untranslated)$/.test(el.textContent.trim()))?.closest('li') || anchor;
-        const checkAnchor = saveReview || firstStatus;
-        if (!mounted.checkLi.isConnected || mounted.checkAnchor !== checkAnchor) {
-            if (saveReview) saveReview.after(mounted.checkLi);
-            else firstStatus.before(mounted.checkLi);
-            mounted.checkAnchor = checkAnchor;
+        const saveAnchor = nativeCheck || firstStatus;
+        const saveReason = disabledReason(vm, true);
+        if (saveReason) {
+            if (mounted.saveLi.isConnected) mounted.saveLi.remove();
+        } else if (!mounted.saveLi.isConnected || mounted.saveAnchor !== saveAnchor) {
+            if (nativeCheck) nativeCheck.after(mounted.saveLi);
+            else firstStatus.before(mounted.saveLi);
+            mounted.saveAnchor = saveAnchor;
         }
-        const checkReason = disabledReason(vm, 3);
-        if (mounted.checkButton.disabled !== Boolean(checkReason)) mounted.checkButton.disabled = Boolean(checkReason);
-        const checkTitle = checkReason || '保存当前译文并标记为已检查，只处理当前词条';
-        if (mounted.checkButton.title !== checkTitle) mounted.checkButton.title = checkTitle;
+        if (mounted.saveButton.disabled !== Boolean(saveReason)) mounted.saveButton.disabled = Boolean(saveReason);
+        const saveTitle = saveReason || '保存当前译文并直接标记为已审核（绿色勾），只处理当前词条';
+        if (mounted.saveButton.title !== saveTitle) mounted.saveButton.title = saveTitle;
         const reason = disabledReason(vm);
+        if (reason) {
+            if (mounted.li.isConnected) mounted.li.remove();
+        } else if (!mounted.li.isConnected) {
+            anchor.before(mounted.li);
+        }
         if (mounted.button.disabled !== Boolean(reason)) mounted.button.disabled = Boolean(reason);
         const title = reason || '直接完成当前词条审核；有修改时一并保存，不批量处理相同词条';
         if (mounted.button.title !== title) mounted.button.title = title;
@@ -238,6 +365,185 @@
 
     // 监听页面点击，列表重新渲染后也能生效；无需管理员权限。
     doc.addEventListener('mousedown', keepMentionInputFocused, true);
+
+    // ===== 功能：代码术语的悬浮注释，以及常驻的格式标签说明 =====
+    let codeHints = null;
+    const hintClass = 'pz-code-hint';
+
+    // 常驻说明放在这里。尖括号和方括号都支持，结束标签也有说明。
+    const formatNotes = {
+        i: '斜体', em: '斜体', b: '加粗', strong: '加粗', u: '下划线',
+        s: '删除线', strike: '删除线', del: '删除线',
+        color: '文字颜色', size: '字号', font: '字体',
+        sup: '上标', sub: '下标', mark: '高亮背景'
+    };
+    const formatPattern = /<\/?(?:i|em|b|strong|u|s|strike|del|color|size|font|sup|sub|mark|br)(?:\s+[^<>]*|=[^<>]*)?\s*\/?>|\[\/?(?:i|em|b|strong|u|s|strike|del|color|size|font|sup|sub|mark|br)(?:\s+[^\[\]]*|=[^\[\]]*)?\s*\]/gi;
+
+    function formatHint(token) {
+        const match = token.match(/^(?:<|\[)(\/)?([a-z]+)([^<>\[\]]*?)(?:>|\])$/i);
+        if (!match) return '';
+        const name = match[2].toLowerCase();
+        if (name === 'br') return '换行。';
+        let meaning = formatNotes[name];
+        if (!meaning) return '';
+        if (match[1]) return `结束${meaning}，后面的文字恢复外层设置。`;
+        const parameter = match[3].trim().replace(/\/$/, '').trim();
+        if (name === 'font' && /\bcolor\s*=/i.test(parameter)) meaning = '字体或文字颜色';
+        return `开始${meaning}，直到对应的结束标签。` +
+            (parameter ? `\n参数：${parameter.replace(/^=\s*/, '')}` : '');
+    }
+
+    function termValues(term) {
+        return [...(Array.isArray(term.match) ? term.match : []), term.term,
+            ...(Array.isArray(term.variants) ? term.variants : [])]
+            .filter(value => typeof value === 'string' && value.length);
+    }
+
+    function isCodeToken(token) {
+        return /^(?:<[^<>]+>|\[\[[^\[\]\r\n]+\]\]|\[[^\[\]\r\n]+\]|⟦[^⟦⟧]+⟧|\{[^{}]+\})$/.test(token);
+    }
+
+    function codeKeys(token) {
+        const keys = [token];
+        // 动态代码也可以用不带括号的名称登记术语，但不匹配代码内的普通单词。
+        const body = token.match(/^(?:⟦([^⟦⟧]+)⟧|\[\[([^\[\]]+)\]\]|\{([^{}]+)\})$/);
+        if (body) {
+            const name = body[1] || body[2] || body[3];
+            keys.push(name);
+            if (/:[0-9]+$/.test(name)) keys.push(name.replace(/:[0-9]+$/, ''));
+        }
+        // 登记 <color> 或 [color]，也可以给带颜色参数的同类标签写注释。
+        const tag = token.match(/^(<|\[)(\/?[a-z]+)(?:\s+[^<>\[\]]+|=[^<>\[\]]+)(>|\])$/i);
+        if (tag) keys.push(tag[1] + tag[2] + tag[3]);
+        return keys;
+    }
+
+    function glossaryHint(token, terms) {
+        const keys = codeKeys(token);
+        const entries = terms.filter(term => termValues(term).some(value => keys.some(key =>
+            term.caseSensitive ? value === key : value.toLowerCase() === key.toLowerCase())));
+        // 自己写的注释优先；重复术语中优先取有说明的那条。
+        const term = entries.find(entry => String(entry.note || '').trim()) || entries[0];
+        if (!term) return '';
+        const note = String(term.note || '').trim();
+        const translation = String(term.translation || '').trim();
+        const sameCode = [...keys, ...termValues(term)].some(key => key.toLowerCase() === translation.toLowerCase());
+        return [translation && !sameCode ? translation : '', note].filter(Boolean).join('\n\n');
+    }
+
+    function addCodeHints(html, terms) {
+        const box = doc.createElement('div');
+        box.innerHTML = html;
+        box.normalize();
+        const hint = token => glossaryHint(token, terms) || formatHint(token);
+        const mark = (el, message) => {
+            el.classList.add(hintClass);
+            // 用 DOM 属性写注释，术语里的引号、尖括号不会变成网页代码。
+            el.setAttribute('title', message);
+        };
+        for (const el of box.querySelectorAll('var, code')) {
+            const message = hint(el.textContent);
+            if (message) mark(el, message);
+        }
+        for (const el of box.querySelectorAll('abbr')) {
+            // 未标成粉色、被网站当作普通术语的代码，也去掉下划线。
+            if (isCodeToken(el.textContent)) {
+                const message = hint(el.textContent) || el.getAttribute('title');
+                if (message) mark(el, message);
+            }
+        }
+
+        // 项目没有把某些格式标成粉色时，也为文字中的这些标签补上说明。
+        const literals = [...new Set(terms.flatMap(termValues))].filter(isCodeToken);
+        const escaped = literals.sort((a, b) => b.length - a.length)
+            .map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        const pattern = new RegExp(escaped.length ? `(?:${escaped.join('|')})|${formatPattern.source}` : formatPattern.source, 'gi');
+        const walker = doc.createTreeWalker(box, 4);
+        const nodes = [];
+        while (walker.nextNode()) {
+            if (!walker.currentNode.parentElement?.closest(`var, code, abbr, .${hintClass}`)) nodes.push(walker.currentNode);
+        }
+        for (const node of nodes) {
+            const text = node.nodeValue;
+            pattern.lastIndex = 0;
+            let match, offset = 0, fragment = null;
+            while ((match = pattern.exec(text))) {
+                const token = match[0], end = match.index + token.length;
+                // 不把 [[i]] 这样的动态代码误认成里面的 [i] 格式标签。
+                if (token.startsWith('[') && !token.startsWith('[[') &&
+                    (text[match.index - 1] === '[' || text[end] === ']')) continue;
+                const message = hint(token);
+                if (!message) continue;
+                fragment ||= doc.createDocumentFragment();
+                fragment.appendChild(doc.createTextNode(text.slice(offset, match.index)));
+                const span = doc.createElement('span');
+                span.textContent = token;
+                mark(span, message);
+                fragment.appendChild(span);
+                offset = end;
+            }
+            if (fragment) {
+                fragment.appendChild(doc.createTextNode(text.slice(offset)));
+                node.replaceWith(fragment);
+            }
+        }
+        return box.innerHTML;
+    }
+
+    function coreVM() {
+        let vm = doc.querySelector('.string-editor .editor-core')?.__vue__;
+        for (let count = 0; vm && count < 8; count++, vm = vm.$parent) {
+            if (vm.$options?.name === 'editorCore' && !vm._isDestroyed &&
+                typeof vm.getHighlightedHtml === 'function') return vm;
+        }
+        return null;
+    }
+
+    function refreshCore(vm) {
+        // 仅重新渲染显示；不调用 init，不重置译文、光标或撤销记录。
+        vm._computedWatchers?.html?.update?.();
+        vm._computedWatchers?.translationGhostHtml?.update?.();
+        vm.$forceUpdate?.();
+    }
+
+    function detachCodeHints() {
+        if (!codeHints) return;
+        const { vm, original, wrapper } = codeHints;
+        if (vm.getHighlightedHtml === wrapper) {
+            vm.getHighlightedHtml = original;
+            if (!vm._isDestroyed) refreshCore(vm);
+        }
+        codeHints = null;
+    }
+
+    function syncCodeHints() {
+        const vm = /^\/projects\/\d+\/strings\/?$/.test(page.location.pathname) ? coreVM() : null;
+        if (codeHints && codeHints.vm !== vm) detachCodeHints();
+        if (!vm || codeHints) return;
+        if (!doc.getElementById('pz-code-hint-style')) {
+            const style = doc.createElement('style');
+            style.id = 'pz-code-hint-style';
+            style.textContent = `.editor-core .${hintClass} { cursor: help; text-decoration: none !important; border-bottom: 0 !important; }`;
+            doc.head.appendChild(style);
+        }
+        const state = { vm, original: vm.getHighlightedHtml, cache: new Map() };
+        state.wrapper = function(...args) {
+            const html = state.original.apply(this, args);
+            // 只改原文显示，不改覆盖在译文输入框下面的预览层。
+            if (args[2] || typeof html !== 'string') return html;
+            const terms = Array.isArray(this.terms) ? this.terms : [];
+            const key = JSON.stringify([html, terms]);
+            if (state.cache.has(key)) return state.cache.get(key);
+            const result = addCodeHints(html, terms);
+            if (state.cache.size >= 20) state.cache.delete(state.cache.keys().next().value);
+            state.cache.set(key, result);
+            return result;
+        };
+        codeHints = state;
+        vm.getHighlightedHtml = state.wrapper;
+        vm.$once?.('hook:beforeDestroy', () => { if (codeHints === state) detachCodeHints(); });
+        refreshCore(vm);
+    }
 
     // ===== 功能：分页加载修复与页码记忆 =====
     let paging = null;

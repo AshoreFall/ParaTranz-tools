@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.3.0
-// @description  空译文审核、保存并检查、注释 @ 补全修复，以及分页加载修复与页码记忆。
+// @version      1.5.0
+// @description  检查与审核、空译文审核、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
 // @run-at       document-idle
