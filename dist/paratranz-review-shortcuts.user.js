@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.8.3
-// @description  检查与审核、空译文保存、空白格式检查、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
+// @version      1.8.5
+// @description  检查与审核、空译文保存、空白格式检查、标点锁定、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
 // @match        https://paratranz.cn/projects/*/strings*
 // @match        https://paratranz.cn/projects/*/issues*
 // @match        https://paratranz.cn/projects/*/settings*
@@ -314,6 +314,8 @@
         catch (error) { console.warn('ParaTranz-tools：疑问分组刷新失败', error?.message); }
         try { page.ParaTranzWhitespaceCheck?.sync?.(); }
         catch (error) { console.warn('ParaTranz-tools：空白检查刷新失败', error?.message); }
+        try { page.ParaTranzPunctuationLocks?.sync?.(); }
+        catch (error) { console.warn('ParaTranz-tools：标点锁定刷新失败', error?.message); }
         syncPaging();
         rememberPagingURL();
         syncEmptySaving();
@@ -1810,16 +1812,25 @@
     }
     async function showChoices(binding, refresh = false) {
         if (!binding.popup) return;
-        if (!binding.popup.hidden && !refresh) { binding.popup.hidden = true;return; }
-        await ready(context(), () => undefined);
-        if (!binding.popup?.isConnected || binding.busy) return;
-        const id = Number(binding.vm.item.id), panel = binding.popup;
+        if (!binding.popup.hidden && !refresh) { binding.popup.hidden = true;binding.choiceRequest++;return; }
+        const ctx = context(), id = Number(binding.vm.item.id), popup = binding.popup;
+        const requestId = binding.choiceRequest = (binding.choiceRequest || 0) + 1;
+        if (!refresh) { popup.replaceChildren(node('div', '标记疑问并分到', 'pz-dg-choice-title'), node('small', '正在读取分组数量', 'pz-dg-muted'));popup.hidden = false; }
+        await ready(ctx, () => undefined);
+        const choiceRows = !refresh || !binding.choiceRows ? (await readDisputed(ctx)).all : binding.choiceRows;
+        if (binding.choiceRequest !== requestId || !popup.isConnected || binding.popup !== popup || binding.busy || Number(binding.vm.item.id) !== id || context().projectId !== ctx.projectId) return;
+        binding.choiceRows = choiceRows;
+        const panel = popup, assignments = state(ctx).assignments;
         binding.popupId = id;
-        panel.replaceChildren(node('div', '标记疑问并分到', 'pz-dg-muted'));
-        panel.append(button('未分组', () => mark(binding, id, '')));
-        for (const group of state().groups) panel.append(button(group.name, () => mark(binding, id, group.id)));
-        if (!state().groups.length) panel.append(node('small', '还没有分组，输入组名即可创建。', 'pz-dg-muted'));
-        panel.append(newGroupForm(() => showChoices(binding, true)));panel.hidden = false;
+        panel.replaceChildren(node('div', '标记疑问并分到', 'pz-dg-choice-title'));
+        const add = (name, groupId) => {
+            const choice = button('', () => mark(binding, id, groupId), 'pz-dg-button pz-dg-choice');
+            const count = binding.choiceRows.filter(row => (assignments[String(row.id)] || '') === groupId).length;
+            choice.setAttribute('aria-label', name);choice.append(node('span', name, 'pz-dg-choice-name'), node('span', String(count), 'pz-dg-choice-count'));panel.append(choice);
+        };
+        add('未分组', '');for (const group of state(ctx).groups) add(group.name, group.id);
+        if (!state(ctx).groups.length) panel.append(node('small', '还没有分组，输入组名即可创建', 'pz-dg-muted'));
+        panel.append(newGroupForm(() => showChoices(binding, true), ctx));panel.hidden = false;
     }
     function syncEditor(vm) {
         for (const [old, binding] of bindings) if (old !== vm || old._isDestroyed) unbind(binding);
@@ -2139,7 +2150,7 @@
         placeLaunch(ctx);syncEditor(editor());syncNativeList();render();
     }
     const api = {
-        version: '1.8.2', sync, open: openOverview, managesRoute: managed,
+        version: '1.8.4', sync, open: openOverview, managesRoute: managed,
         groups() { return copy(state().groups); }, createGroup,
         assignment(id) { return state().assignments[String(id)] || ''; }, assign,
         destroy() { destroyed = true;request++;for (const binding of [...bindings.values()]) unbind(binding);for (const binding of [...nativeLists.values()]) disposeList(binding);teardown();doc.removeEventListener('click', dismiss);doc.removeEventListener('keydown', dismiss);page.removeEventListener?.('storage', storageChanged);if (page.ParaTranzDisputeGroups === api) delete page.ParaTranzDisputeGroups; }
@@ -2172,7 +2183,7 @@
                 '.pz-dg-button{border:0;background:transparent;color:#007bff;padding:5px 8px;cursor:pointer;font:inherit}.pz-dg-panel input,.pz-dg-panel select,.pz-dg-editor-group select,.pz-dg-choices input{font:inherit;border:1px solid #adb5bd66;border-radius:5px;padding:5px 8px;background:transparent;color:inherit;max-width:100%}.pz-dg-muted{color:#6c757d}.pz-dg-status:empty{display:none}.pz-dg-status{color:#b42318;margin:8px 0}' +
                 '.pz-dg-rows{max-height:55vh;overflow:auto}.pz-dg-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #adb5bd33}.pz-dg-row-text{flex:1;min-width:0}.pz-dg-row-text>a,.pz-dg-row-text>small{display:block;overflow-wrap:anywhere;white-space:pre-wrap}.pz-dg-row .pz-dg-picker{width:160px;flex-shrink:0}.pz-dg-picker>select{width:100%}.pz-dg-picker .pz-dg-create input{min-width:0;width:100%}' +
                 '.pz-dg-menu-row{position:relative}.pz-dg-target{padding-right:42px!important}.pz-dg-arrow{display:flex;align-items:center;justify-content:center;position:absolute;right:6px;top:3px;width:30px;height:30px;border:0;border-radius:5px;background:transparent;color:#007bff;cursor:pointer;font-size:20px;line-height:1}.pz-dg-choices{position:absolute;right:0;top:100%;z-index:1080;width:240px;max-width:85vw;max-height:320px;overflow:auto;padding:10px;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);border:1px solid #adb5bd66;border-radius:6px;box-shadow:0 5px 16px #0002}' +
-                '.pz-dg-choices>.pz-dg-button{display:block;width:100%;text-align:left}.pz-dg-choices .pz-dg-create{flex-wrap:nowrap}.pz-dg-choices input{min-width:0;width:100%}.pz-dg-editor-group{margin:10px 0;font-size:.875rem}' +
+                '.pz-dg-create>button{flex:0 0 auto;white-space:nowrap}.pz-dg-create>input{flex:1 1 0;min-width:0}.pz-dg-choices{width:240px;padding:6px;font-size:.875rem;border-radius:8px}.pz-dg-choice-title{padding:6px 8px;font-size:.8em;color:#6c757d}.pz-dg-choices>.pz-dg-button.pz-dg-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 8px;border-radius:4px;line-height:1.4;color:inherit}.pz-dg-choice:hover,.pz-dg-choice:focus-visible{background:#007bff0d;color:#007bff}.pz-dg-choice-name{min-width:0;overflow-wrap:anywhere}.pz-dg-choice-count{flex:0 0 auto;font-size:.85em;color:#6c757d;font-variant-numeric:tabular-nums}.pz-dg-choices>.pz-dg-create{border-top:1px solid #adb5bd33;padding:10px 2px 2px;margin:6px 0 0;gap:6px}.pz-dg-choices>.pz-dg-create>input{width:0}.pz-dg-choices>.pz-dg-create>button{padding:5px 8px;color:#007bff}.pz-dg-choices>.pz-dg-button{display:block;width:100%;text-align:left}.pz-dg-choices .pz-dg-create{flex-wrap:nowrap}.pz-dg-choices input{min-width:0;width:100%}.pz-dg-editor-group{margin:10px 0;font-size:.875rem}' +
                 '.pz-dg-pagination{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding-top:12px}.pz-dg-page-controls{display:flex;align-items:center;gap:6px}.pz-dg-page-button{background:transparent;color:#007bff;border:1px solid #adb5bd66;padding:5px 10px;border-radius:5px;font:inherit;cursor:pointer}.pz-dg-page-button:disabled{color:#6c757d;opacity:.5;cursor:default}.pz-dg-page-controls input{width:62px;text-align:center}' +
                 '.pz-dg-modal{z-index:1050;overflow:auto}.pz-dg-backdrop{z-index:1040}.pz-dg-modal .pz-dg-head{display:none}.pz-dg-modal .pz-dg-panel{margin:0;padding:0;border:0}.pz-dg-modal .modal-body{padding:1rem}.pz-dg-modal .pz-dg-rows{max-height:50vh}.pz-dg-modal .pz-dg-launch{display:none}' +
                 '.pz-dg-modal{display:flex!important;align-items:center;justify-content:center;padding:20px;font-size:14px}.pz-dg-modal .modal-dialog{width:100%;max-width:560px;margin:0;max-height:calc(100vh - 40px)}.pz-dg-modal .modal-content{max-height:calc(100vh - 40px);border-radius:10px;border:1px solid #adb5bd55;overflow:hidden;box-shadow:0 12px 48px #0003}.pz-dg-modal .modal-header{padding:14px 20px;align-items:center}.pz-dg-modal .modal-title{font-size:16px;font-weight:600;line-height:1.4}.pz-dg-modal .close{margin:0;padding:0;width:28px;height:28px;font-size:24px;line-height:1;opacity:.6}.pz-dg-modal .modal-body{padding:16px 20px;overflow:auto;min-height:0}.pz-dg-modal .modal-footer{padding:10px 20px}.pz-dg-modal .modal-footer .btn{font-size:14px;padding:6px 16px}.pz-dg-modal .pz-dg-panel{font-size:inherit}.pz-dg-modal .pz-dg-mode{font-size:12px;gap:8px;border-bottom:1px solid #adb5bd33;padding-bottom:12px;margin-bottom:12px}.pz-dg-mode-badge{background:#6c757d12;border-radius:4px;padding:3px 7px}.pz-dg-modal .pz-dg-share{margin-left:auto;font-size:12px;padding:4px 8px}.pz-dg-modal .pz-dg-tools{margin:0;gap:6px}.pz-dg-modal .pz-dg-tools>select{flex:1;min-width:130px;width:0;height:34px}.pz-dg-modal .pz-dg-button{padding:6px 8px;line-height:1.4;white-space:nowrap}.pz-dg-modal .pz-dg-secondary{border:1px solid #adb5bd66;border-radius:5px;color:#6c757d}.pz-dg-modal .pz-dg-danger{color:#c54545}.pz-dg-modal .pz-dg-rename{flex-basis:100%;margin:4px 0 0;padding:10px;background:#f8f9fa;border-radius:6px}.pz-dg-modal .pz-dg-rename>input{flex:1;min-width:100px;width:0}.pz-dg-modal .pz-dg-new-group{margin:12px 0;flex-wrap:nowrap;padding:10px;border:1px solid #adb5bd33;border-radius:6px;background:#f8f9fa}.pz-dg-modal .pz-dg-new-group>input{flex:1;min-width:0;width:0;background:var(--pt-bg,#fff)}.pz-dg-modal .pz-dg-new-group>button{background:#007bff;color:white;border-radius:5px;padding:6px 12px}.pz-dg-modal .pz-dg-rows{max-height:min(360px,42vh)}.pz-dg-modal .pz-dg-row{padding:10px 0;gap:12px}.pz-dg-modal .pz-dg-row .pz-dg-picker{width:128px}.pz-dg-modal .pz-dg-row-text>a{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;overflow:hidden;line-height:1.5}.pz-dg-modal .pz-dg-row-text>small{white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:12px;margin-top:3px}.pz-dg-empty{padding:24px 12px;text-align:center;color:#6c757d;border-radius:6px;background:#f8f9fa}.pz-dg-empty strong{display:block;font-size:14px;font-weight:500}.pz-dg-empty small{display:block;font-size:12px;line-height:1.5;margin-top:6px}.pz-dg-modal .pz-dg-pagination{font-size:12px;gap:8px;border-top:1px solid #adb5bd33;margin-top:8px;padding-top:10px}.pz-dg-pagination:empty{display:none}.pz-dg-modal .pz-dg-page-controls{gap:3px}.pz-dg-modal .pz-dg-page-controls input{width:42px;padding:4px}.pz-dg-modal .pz-dg-page-button{padding:4px 7px}@media(max-width:480px){.pz-dg-modal{padding:12px}.pz-dg-modal .modal-body{padding:12px}.pz-dg-modal .modal-header,.pz-dg-modal .modal-footer{padding:12px}.pz-dg-modal .pz-dg-row{align-items:flex-start}.pz-dg-modal .pz-dg-row .pz-dg-picker{width:100px}.pz-dg-modal .pz-dg-pagination{justify-content:center}.pz-dg-modal .pz-dg-mode small{flex:1}}' +
@@ -2187,7 +2198,7 @@
 (() => {
     'use strict';
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window, doc = page.document;
-    const bindings = new Map();let destroyed = false, queued = false;
+    const PREFS_KEY = 'paratranz-tools.pre-save-checks.v1', bindings = new Map();let preferences = null;let destroyed = false, queued = false;
     const H = '[ \\t\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000]';
     const leading = new RegExp('^' + H + '*'), trailing = new RegExp(H + '*$'), blank = new RegExp('^' + H + '*$');
     function parts(line) {
@@ -2219,7 +2230,7 @@
         const sameBlankLayout = sourceLines.length === targetLines.length && sourceLines.every((line, i) => line.blank === targetLines[i].blank);
         if (!sameBlankLayout && (sourceLines.some(line => line.blank) || targetLines.some(line => line.blank))) issues.push('译文的空行数量或位置与原文不同');
         else if (sameBlankLayout && sourceLines.some((line, i) => line.blank && source[i * 2] !== target[i * 2])) issues.push('空行中的空白字符与原文不同');
-        if (!equalBodies) issues.push('正文行数不同，无法仅通过调整空白修复');
+        if (!equalBodies && issues.length) issues.push('正文行数不同，无法仅通过调整空白修复');
         let fixed = translation;
         // 不拼接正文行。带自定义换行标签时，也不增删标签来修复空行。
         const repairable = equalBodies && (!custom || sourceLines.length === targetLines.length && sameBlankLayout);
@@ -2237,6 +2248,65 @@
         for (let i = 0; vm && i < 16; i++, vm = vm.$parent) if (vm.$options?.name === 'stringEditor' && vm.item && typeof vm.preSaveCheck === 'function') return vm;
         return null;
     }
+    function prefs(vm) {
+        if (preferences) return preferences;
+        try { const saved = JSON.parse(page.localStorage.getItem(PREFS_KEY));if (saved && typeof saved === 'object') preferences = { code: saved.code === true, lines: saved.lines === true, spaces: saved.spaces === true }; } catch { /* 使用原设置 */ }
+        if (!preferences) {
+            preferences = { code: !!vm.skipTagCheck, lines: !!vm.skipTagCheck, spaces: false };
+            if (vm.skipTagCheck) try { page.localStorage.setItem(PREFS_KEY, JSON.stringify(preferences)); } catch { /* 当前页面仍可使用 */ }
+        }
+        return preferences;
+    }
+    function syncPreferences(binding) {
+        const host = doc.querySelector('.string-editor'), value = prefs(binding.vm);
+        for (const label of host?.querySelectorAll('label') || []) {
+            if (!/^(跳过保存前检查|Skip pre-save check)$/.test(label.textContent.trim())) continue;
+            const native = label.closest('.custom-control') || label.parentElement;
+            if (!native?.querySelector('input[type="checkbox"]')) continue;
+            let wrap = native.nextElementSibling;
+            if (!wrap?.classList.contains('pz-check-options')) {
+                wrap = node('div', null, 'pz-check-options');
+                for (const [key, text] of [['code', '跳过代码检查'], ['lines', '跳过换行检查'], ['spaces', '跳过空格检查']]) {
+                    const row = node('div', null, native.className), input = node('input'), ownLabel = node('label', text, label.className);
+                    row.classList.remove('pz-check-original');
+                    input.type = 'checkbox';input.className = native.querySelector('input').className;
+                    input.id = `pz-check-${key}-${++optionSerial}`;input.dataset.check = key;ownLabel.htmlFor = input.id;
+                    input.checked = value[key];
+                    input.addEventListener('change', () => {
+                        const next = { ...preferences, [key]: input.checked };
+                        try { page.localStorage.setItem(PREFS_KEY, JSON.stringify(next));preferences = next;queue(); }
+                        catch { input.checked = preferences[key];binding.vm.$alert?.error?.('检查设置未能保存，请重试'); }
+                    });
+                    row.append(input, ownLabel);wrap.append(row);
+                }
+                native.after(wrap);binding.preferenceUI.push({ native, wrap });
+            }
+            native.classList.add('pz-check-original');
+            for (const input of wrap.querySelectorAll('input')) input.checked = value[input.dataset.check];
+        }
+    }
+    let optionSerial = 0;
+    function nativeCheck(vm, original, args, value) {
+        // 未跳过代码或换行时，保留原生方法的行为和返回时序。
+        if (!value.code && !value.lines) {
+            const previous = vm.skipTagCheck;
+            try { vm.skipTagCheck = false;return original.call(vm, ...args); }
+            finally { vm.skipTagCheck = previous; }
+        }
+        const decode = text => String(text ?? '').split('&lt;').join('<').split('&gt;').join('>');
+        const source = decode(vm.item.original), target = decode(vm.translation);
+        const rule = vm.$store?.state?.tagRules?.find(rule => rule.type === 9)?.string || '\n';
+        const a = source.split(rule).length, b = target.split(rule).length;
+        vm.warnings.lines = value.lines || a === b ? [] : [a, b];
+        const sourceTags = value.code ? [] : vm.$extractTags(source), targetTags = value.code ? [] : vm.$extractTags(target);
+        vm.warnings.missing = sourceTags.filter(tag => !targetTags.includes(tag));
+        vm.warnings.redundant = targetTags.filter(tag => !sourceTags.includes(tag));
+        if (!vm.warnings.lines.length && !vm.warnings.missing.length && !vm.warnings.redundant.length) return true;
+        return new Promise(resolve => {
+            vm.onConfirmOK = () => resolve(true);vm.onConfirmCancel = () => resolve(false);vm.onConfirmHidden = () => resolve(null);
+            vm.$bvModal.show('tagConfirm');
+        });
+    }
     function snapshot(vm) { return { vm, id: Number(vm.item.id), project: String(vm.projectId), original: String(vm.item.original ?? ''), text: String(vm.translation ?? '') }; }
     function current(value) { const vm = value.vm;return editor() === vm && Number(vm.item?.id) === value.id && String(vm.projectId) === value.project && String(vm.item.original ?? '') === value.original && String(vm.translation ?? '') === value.text; }
     function node(tag, text, className) { const el = doc.createElement(tag);if (text != null) el.textContent = text;if (className) el.className = className;return el; }
@@ -2245,16 +2315,17 @@
     function unbind(binding) {
         if (binding.checking) binding.vm.onConfirmCancel?.();
         if (binding.vm.preSaveCheck === binding.wrapper) binding.vm.preSaveCheck = binding.original;
-        removeUI(binding);bindings.delete(binding.vm);
+        removeUI(binding);for (const { native, wrap } of binding.preferenceUI) { native.classList.remove('pz-check-original');wrap.remove(); }bindings.delete(binding.vm);
     }
     function bind(vm) {
         if (bindings.has(vm)) return bindings.get(vm);
-        const binding = { vm, original: vm.preSaveCheck, checking: null, ui: null, stamp: '' };
+        const binding = { vm, original: vm.preSaveCheck, checking: null, ui: null, stamp: '', preferenceUI: [] };
         binding.wrapper = function(...args) {
             if (binding.checking) return false;
-            const captured = snapshot(this), analysis = inspect(captured.original, captured.text, this.lineBreakChar);
+            const value = prefs(this), captured = snapshot(this), analysis = value.spaces ? { issues: [] } : inspect(captured.original, captured.text, this.lineBreakChar);
+            if (value.lines) analysis.issues = analysis.issues.filter(issue => !/空行数量或位置|正文行数/.test(issue));
             let result;
-            try { result = binding.original.call(this, ...args); } catch (error) { throw error; }
+            try { result = nativeCheck(this, binding.original, args, value); } catch (error) { throw error; }
             if (!analysis.issues.length) return result;
             // 网站已有检查失败时，复用它正在打开的同一个弹窗。
             if (result === true && analysis.issues.length && this.$bvModal?.show) {
@@ -2285,29 +2356,197 @@
         if (destroyed) return;
         const vm = editor();for (const [old, binding] of bindings) if (old !== vm || old._isDestroyed) unbind(binding);
         if (!vm) return;
-        const binding = bind(vm), check = binding.checking;
+        const binding = bind(vm), check = binding.checking;syncPreferences(binding);
         if (!check || !check.analysis.issues.length) { removeUI(binding);return; }
         const body = doc.getElementById('tagConfirm___BV_modal_body_') || doc.querySelector('#tagConfirm .modal-body');if (!body) return;
         const usable = current(check.captured) && vm.canEdit !== false && !vm.saving && !vm.polishing;
-        const stamp = JSON.stringify([check.captured.id, check.captured.text, check.analysis.issues, usable]);
+        const nativeWarnings = ['missing', 'redundant', 'lines'].some(key => vm.warnings?.[key]?.length);
+        const stamp = JSON.stringify([nativeWarnings, check.captured.id, check.captured.text, check.analysis.issues, usable]);
         if (binding.ui?.isConnected && binding.ui.parentElement === body && binding.stamp === stamp) return;
         removeUI(binding);binding.stamp = stamp;
-        const ui = node('section', null, 'pz-whitespace-check'), heading = node('div', null, 'pz-whitespace-heading');
+        const ui = node('section', null, 'pz-whitespace-check' + (nativeWarnings ? '' : ' pz-whitespace-only')), heading = node('div', null, 'pz-whitespace-heading');
         heading.append(node('i', null, 'far fa-exclamation-circle'), node('strong', '空白格式检查'));
         const list = node('ul');for (const issue of check.analysis.issues.slice(0, 6)) list.append(node('li', issue));
         if (check.analysis.issues.length > 6) list.append(node('li', `另有 ${check.analysis.issues.length - 6} 处空白格式不同`));
         const controls = node('div', null, 'pz-whitespace-actions'), fix = node('button', '修复空格', 'btn btn-outline-primary btn-sm');fix.type = 'button';fix.disabled = !usable || !check.analysis.repairable;
         fix.addEventListener('click', event => { event.preventDefault();event.stopPropagation();repair(binding); });
-        controls.append(fix, node('small', check.analysis.repairable ? '按原文恢复缩进及行尾空白；修复后重新保存。' : '正文行或换行标签不同，需手动调整。'));
+        controls.append(fix, node('small', check.analysis.repairable ? '按原文恢复缩进及行尾空白；修复后重新保存' : '正文行或换行标签不同，需手动调整'));
         ui.append(heading, list, controls);body.append(ui);binding.ui = ui;
     }
-    const api = { version: '1.8.3', inspect, sync, destroy() { destroyed = true;for (const binding of [...bindings.values()]) unbind(binding);if (page.ParaTranzWhitespaceCheck === api) delete page.ParaTranzWhitespaceCheck; } };
+    const api = { version: '1.8.4', inspect, sync, destroy() { destroyed = true;for (const binding of [...bindings.values()]) unbind(binding);if (page.ParaTranzWhitespaceCheck === api) delete page.ParaTranzWhitespaceCheck; } };
     page.ParaTranzWhitespaceCheck = api;
     function start() {
         if (!doc.getElementById('pz-whitespace-check-style')) {
-            const style = node('style');style.id = 'pz-whitespace-check-style';style.textContent = '.pz-whitespace-check{margin-top:14px;padding-top:12px;border-top:1px solid #adb5bd55;font-size:.875rem}.pz-whitespace-heading{display:flex;align-items:center;gap:7px}.pz-whitespace-heading strong{font-weight:500}.pz-whitespace-check ul{padding-left:22px;margin:8px 0;line-height:1.6}.pz-whitespace-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.pz-whitespace-actions small{color:#6c757d}';doc.head?.append(style);
+            const style = node('style');style.id = 'pz-whitespace-check-style';style.textContent = '.pz-whitespace-check{margin-top:14px;padding-top:12px;border-top:1px solid #adb5bd55;font-size:.875rem}.pz-whitespace-only{margin-top:0;padding-top:0;border-top:0}.pz-check-original{display:none!important}.pz-check-options>.custom-control+.custom-control{margin-top:.5rem}.pz-whitespace-heading{display:flex;align-items:center;gap:7px}.pz-whitespace-heading strong{font-weight:500}.pz-whitespace-check ul{padding-left:22px;margin:8px 0;line-height:1.6}.pz-whitespace-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.pz-whitespace-actions small{color:#6c757d}';doc.head?.append(style);
         }
         sync();
+    }
+    if (doc.body) start();else doc.addEventListener('DOMContentLoaded', start, { once: true });
+})();
+
+// ===== 功能：字符面板中的标点锁定，仅规范新输入的译文 =====
+(() => {
+    'use strict';
+    const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window, doc = page.document;
+    const KEY = 'paratranz-tools.punctuation-locks.v1', bindings = new Map(), panels = new Map();
+    const defaults = { quotes: false, brackets: false, colon: false, ellipsis: false };
+    let preferences = { ...defaults }, destroyed = false, serial = 0;
+    try { const value = JSON.parse(page.localStorage.getItem(KEY));for (const key of Object.keys(defaults)) preferences[key] = value?.[key] === true; } catch { /* 默认关闭 */ }
+    const punctuation = /[‘’‚‛＇“”„‟＂（）［］｛｝【】：]|\.{3,}|[.…⋯]*[…⋯][.…⋯]*/g;
+    const quoteMap = { '‘': "'", '’': "'", '‚': "'", '‛': "'", '＇': "'", '“': '"', '”': '"', '„': '"', '‟': '"', '＂': '"' };
+    const bracketMap = { '（': '(', '）': ')', '［': '[', '］': ']', '｛': '{', '｝': '}', '【': '[', '】': ']' };
+    function span(before, after) {
+        let start = 0, oldEnd = before.length, end = after.length;
+        while (start < oldEnd && start < end && before[start] === after[start]) start++;
+        while (oldEnd > start && end > start && before[oldEnd - 1] === after[end - 1]) { oldEnd--;end--; }
+        return { start, oldEnd, end };
+    }
+    function protectedRanges(text, core) {
+        const ranges = [];
+        const add = expression => { for (const match of text.matchAll(expression)) if (match[0]) ranges.push([match.index, match.index + match[0].length]); };
+        // 项目的代码规则优先；补充常见标签、占位符和正在输入的未闭合代码。
+        for (const rule of core?.$store?.state?.tagRules || []) if (rule.source) try { add(new RegExp(rule.source, 'g')); } catch { /* 忽略无效规则 */ }
+        try { for (const tag of core?.$extractTags?.(text) || []) { if (!tag) continue;let offset = 0, index;while ((index = text.indexOf(tag, offset)) !== -1) { ranges.push([index, index + tag.length]);offset = index + tag.length; } } } catch { /* 使用常见代码规则 */ }
+        add(/<\/?[A-Za-z][^>\n]*>|&lt;\/?[A-Za-z][\s\S]*?&gt;|\$\{[^}\n]*\}|\{[^{}\n]*\}|\[{1,2}[A-Za-z_][^\]\n]*\]{1,2}/g);
+        add(/<\/?[A-Za-z][^>\n]*$|\$\{[^}\n]*$|\[{1,2}[A-Za-z_][^\]\n]*$/g);
+        return ranges;
+    }
+    function normalize(before, after, start, end, value = preferences, core, inserted) {
+        before = String(before);after = String(after);
+        if (!Object.values(value).some(Boolean)) return { text: after, start, end, changed: false };
+        const edit = inserted || span(before, after);
+        if (edit.end <= edit.start) return { text: after, start, end, changed: false };
+        let left = edit.start, right = edit.end;
+        // 连续键入三个句点时，只扩展这一次新增省略号所在的范围。
+        if (value.ellipsis && /^[.…⋯]+$/.test(after.slice(left, right))) {
+            while (left > 0 && /[.…⋯]/.test(after[left - 1])) left--;
+            while (right < after.length && /[.…⋯]/.test(after[right])) right++;
+        }
+        const matches = [...after.slice(left, right).matchAll(punctuation)];
+        if (!matches.length) return { text: after, start, end, changed: false };
+        const protectedCode = protectedRanges(after, core), edits = [];
+        for (const match of matches) {
+            const from = left + match.index, to = from + match[0].length;
+            if (protectedCode.some(([a, b]) => from < b && to > a)) continue;
+            const text = match[0];let replacement = text;
+            if (value.quotes && quoteMap[text]) replacement = quoteMap[text];
+            else if (value.brackets && bracketMap[text]) replacement = bracketMap[text];
+            else if (value.colon && text === '：') replacement = ':';
+            else if (value.ellipsis && /^(?:\.{3,}|[.…⋯]*[…⋯][.…⋯]*)$/.test(text)) replacement = '…';
+            if (replacement !== text) edits.push({ from, to, replacement });
+        }
+        let text = '', offset = 0;
+        for (const edit of edits) { text += after.slice(offset, edit.from) + edit.replacement;offset = edit.to; }
+        text += after.slice(offset);
+        const position = point => {
+            let delta = 0;
+            for (const edit of edits) {
+                if (point <= edit.from) break;
+                if (point < edit.to) return edit.from + delta + edit.replacement.length;
+                delta += edit.replacement.length - (edit.to - edit.from);
+            }
+            return point + delta;
+        };
+        return { text, start: position(start), end: position(end), changed: edits.length > 0 };
+    }
+    function editor() {
+        let vm = doc.querySelector('.string-editor')?.__vue__;
+        for (let i = 0; vm && i < 16; i++, vm = vm.$parent) if (vm.$options?.name === 'stringEditor') return vm;
+        return null;
+    }
+    function usable(binding) { return !destroyed && editor() === binding.vm && binding.input.isConnected && !binding.input.disabled && binding.vm.canEdit !== false && !binding.vm.saving && !binding.vm.polishing && !binding.core.disabled; }
+    function snapshot(binding) { binding.text = binding.input.value;binding.id = binding.vm.item?.id; }
+    function apply(binding, result) {
+        if (!result.changed || !usable(binding)) return;
+        binding.input.value = result.text;binding.input.setSelectionRange(result.start, result.end);
+    }
+    function bind(vm) {
+        const core = vm.$refs?.editor, input = core?.$refs?.textarea;
+        if (!core || !input?.matches?.('textarea.translation')) return;
+        let binding = bindings.get(core);
+        if (binding && binding.input === input) { if (binding.id !== vm.item?.id && !binding.composing) snapshot(binding);return; }
+        if (binding) unbind(binding);
+        binding = { vm, core, input, composing: false, text: input.value, id: vm.item?.id, listeners: [], original: core.insert };
+        const listen = (name, handler) => { input.addEventListener(name, handler, true);binding.listeners.push([name, handler]); };
+        listen('focus', () => snapshot(binding));
+        listen('beforeinput', () => { if (!binding.composing) snapshot(binding); });
+        listen('compositionstart', () => { snapshot(binding);binding.composing = true;binding.compositionText = input.value; });
+        listen('input', event => {
+            if (binding.composing || event.isComposing || /^history/.test(event.inputType || '') || !usable(binding) || binding.id !== vm.item?.id) { snapshot(binding);return; }
+            apply(binding, normalize(binding.text, input.value, input.selectionStart, input.selectionEnd, preferences, core));snapshot(binding);
+            // 捕获阶段先修正 value，随后由原生 onInput 写入草稿并记录撤销历史。
+        });
+        listen('compositionend', () => {
+            binding.composing = false;
+            if (usable(binding) && binding.id === vm.item?.id) {
+                const result = normalize(binding.compositionText, input.value, input.selectionStart, input.selectionEnd, preferences, core);
+                apply(binding, result);
+                if (result.changed) input.dispatchEvent(new page.Event('input', { bubbles: true }));
+            }
+            snapshot(binding);
+        });
+        if (typeof binding.original === 'function') {
+            binding.wrapper = function(value, ...args) {
+                if (!usable(binding) || binding.composing) return binding.original.call(this, value, ...args);
+                const before = input.value, a = input.selectionStart, b = input.selectionEnd, inserted = String(value);
+                const after = before.slice(0, a) + inserted + before.slice(b), caret = a + inserted.length;
+                const result = normalize(before, after, caret, caret, preferences, core, { start: a, end: caret });
+                if (!result.changed) return binding.original.call(this, value, ...args);
+                const change = span(before, result.text);input.setSelectionRange(change.start, change.oldEnd);
+                return binding.original.call(this, result.text.slice(change.start, change.end), ...args);
+            };
+            core.insert = binding.wrapper;
+        }
+        bindings.set(core, binding);core.$once?.('hook:beforeDestroy', () => unbind(binding));
+    }
+    function unbind(binding) {
+        for (const [name, handler] of binding.listeners) binding.input.removeEventListener(name, handler, true);
+        if (binding.core.insert === binding.wrapper) binding.core.insert = binding.original;
+        bindings.delete(binding.core);
+    }
+    function node(tag, text, className) { const el = doc.createElement(tag);if (text != null) el.textContent = text;if (className) el.className = className;return el; }
+    function clearPanel(panel) { panel.aside.remove();panel.body.classList.remove('pz-punctuation-body');panel.popover.classList.remove('pz-punctuation-popover');panels.delete(panel.body); }
+    function syncPanels(vm) {
+        for (const panel of [...panels.values()]) if (!panel.body.isConnected || !panel.table.isConnected || panel.table.parentElement !== panel.body) clearPanel(panel);
+        if (!vm) { for (const panel of [...panels.values()]) clearPanel(panel);return; }
+        for (const table of doc.querySelectorAll('.popover .popover-body>.table-spc')) {
+            const body = table.parentElement, popover = table.closest('.popover');
+            if (!panels.has(body)) {
+                const aside = node('aside', null, 'pz-punctuation-sidebar');aside.setAttribute('aria-label', '标点锁定');
+                aside.append(node('h3', '标点锁定'), node('small', '自动规范新输入的标点', 'pz-punctuation-caption'));
+                for (const [key, title, sample, detail] of [['quotes', '引号', `" '`, '英文单双引号'], ['brackets', '括号', '( ) [ ]', '英文括号'], ['colon', '冒号', ':', '英文冒号'], ['ellipsis', '省略号', '…', '中文半组，三个点']]) {
+                    const row = node('label', null, 'pz-punctuation-option'), text = node('span', null, 'pz-punctuation-copy');
+                    const heading = node('span', null, 'pz-punctuation-name');heading.append(node('span', title), node('span', sample, 'pz-punctuation-sample'));
+                    text.append(heading, node('small', detail));
+                    const input = node('input');input.type = 'checkbox';input.id = `pz-punctuation-${++serial}`;input.dataset.lock = key;input.checked = preferences[key];
+                    input.setAttribute('aria-label', '锁定' + title + (key === 'ellipsis' ? '为中文半组' : '为英文'));
+                    input.addEventListener('change', () => {
+                        const next = { ...preferences, [key]: input.checked };
+                        try { page.localStorage.setItem(KEY, JSON.stringify(next));preferences = next;sync(); }
+                        catch { input.checked = preferences[key];vm.$alert?.error?.('标点设置未能保存，请重试'); }
+                    });
+                    row.append(text, input, node('span', null, 'pz-punctuation-switch'));aside.append(row);
+                }
+                body.insertBefore(aside, table);body.classList.add('pz-punctuation-body');popover.classList.add('pz-punctuation-popover');panels.set(body, { aside, body, table, popover });
+                // 更新浮层定位，避免宽度改变后贴出视口。
+                let owner = popover.__vue__;for (let i = 0; owner && i < 8; i++, owner = owner.$parent) if (typeof owner.updatePopper === 'function') { owner.$nextTick?.(() => owner.updatePopper());break; }
+            }
+            for (const input of panels.get(body).aside.querySelectorAll('input')) input.checked = preferences[input.dataset.lock];
+        }
+    }
+    function sync() {
+        if (destroyed) return;
+        const vm = editor(), core = vm?.$refs?.editor;
+        for (const binding of [...bindings.values()]) if (binding.vm !== vm || binding.core !== core || binding.core._isDestroyed || !binding.input.isConnected) unbind(binding);
+        if (vm) bind(vm);syncPanels(vm);
+    }
+    const api = { version: '1.8.5', normalize, sync, destroy() { destroyed = true;for (const binding of [...bindings.values()]) unbind(binding);for (const panel of [...panels.values()]) clearPanel(panel);if (page.ParaTranzPunctuationLocks === api) delete page.ParaTranzPunctuationLocks; } };
+    page.ParaTranzPunctuationLocks = api;
+    function start() {
+    if (!doc.getElementById('pz-punctuation-style')) {
+        const style = node('style');style.id = 'pz-punctuation-style';style.textContent = '.pz-punctuation-popover{width:640px!important;max-width:calc(100vw - 24px)!important}.pz-punctuation-body{display:grid;grid-template-columns:160px minmax(0,1fr);gap:12px;padding:12px!important}.pz-punctuation-sidebar{grid-column:1;grid-row:1;border-right:1px solid #adb5bd33;padding-right:12px;min-width:0}.pz-punctuation-sidebar h3{font-size:14px;font-weight:600;line-height:1.4;margin:2px 0 4px}.pz-punctuation-caption{display:block;font-size:11px;color:#6c757d;margin-bottom:12px}.pz-punctuation-option{display:flex;align-items:center;gap:8px;padding:9px 0;margin:0;cursor:pointer}.pz-punctuation-copy{flex:1;min-width:0}.pz-punctuation-name{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:13px;line-height:1.4}.pz-punctuation-sample{font-family:monospace;font-size:13px;color:#6c757d}.pz-punctuation-copy>small{display:block;font-size:11px;color:#6c757d;line-height:1.4;margin-top:2px}.pz-punctuation-option>input{position:absolute;opacity:0;width:1px;height:1px}.pz-punctuation-switch{flex:0 0 auto;position:relative;width:28px;height:16px;border-radius:8px;background:#adb5bd;transition:background .15s}.pz-punctuation-switch:after{content:"";position:absolute;width:12px;height:12px;left:2px;top:2px;border-radius:50%;background:#fff;transition:transform .15s}.pz-punctuation-option>input:checked+.pz-punctuation-switch{background:#007bff}.pz-punctuation-option>input:checked+.pz-punctuation-switch:after{transform:translateX(12px)}.pz-punctuation-option>input:focus-visible+.pz-punctuation-switch{outline:2px solid #007bff;outline-offset:3px}.pz-punctuation-body>.table-spc{grid-column:2;grid-row:1;min-width:0;width:100%!important;margin:0!important}.pz-punctuation-body>div:not(.table-spc){grid-column:1/-1;font-size:12px;padding-top:8px;border-top:1px solid #adb5bd33}.pz-punctuation-body .table-spc>.spc{border-radius:5px}@media(max-width:520px){.pz-punctuation-body{grid-template-columns:132px minmax(0,1fr);gap:8px;padding:10px!important}.pz-punctuation-sidebar{padding-right:8px}.pz-punctuation-body .table-spc>.spc{width:20%!important}}@media(prefers-reduced-motion:reduce){.pz-punctuation-switch,.pz-punctuation-switch:after{transition:none}}';doc.head?.append(style);
+    }
+    sync();
     }
     if (doc.body) start();else doc.addEventListener('DOMContentLoaded', start, { once: true });
 })();
