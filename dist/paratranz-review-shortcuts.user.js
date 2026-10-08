@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.5.3
+// @version      1.5.5
 // @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
@@ -24,6 +24,7 @@
     let scheduled = false;
     const nativeChecks = new Map();
     let mainControl = null;
+    let ordinarySaveControl = null;
 
     // ===== 编辑器与权限 =====
     function editorVM() {
@@ -255,16 +256,16 @@
             if (doc.head && !doc.getElementById('pz-main-action-style')) {
                 const style = doc.createElement('style');
                 style.id = 'pz-main-action-style';
-                style.textContent = '[data-pz-main-action="3"] svg, [data-pz-main-action="3"] > i { display: none !important; }' +
-                    '[data-pz-main-action="3"]::before { content: "☺"; display: inline-block; margin-right: .35em; font-size: 1.4em; line-height: 1; vertical-align: -.1em; }' +
-                    '[data-pz-checking]::before { animation: pz-smile-nod .7s ease-in-out infinite; }' +
+                // 复用原生 fa-fw 图标，只换字形；大小、基线、留白都与“保存”一致。
+                style.textContent = '[data-pz-main-action="3"] > i::before { content: "\\f118" !important; }' +
+                    '[data-pz-checking] > i { animation: pz-smile-nod .7s ease-in-out infinite !important; }' +
                     '@keyframes pz-smile-nod { 0%, 100% { transform: rotate(-7deg); } 50% { transform: translateY(-2px) rotate(7deg) scale(1.08); } }' +
-                    '@media (prefers-reduced-motion: reduce) { [data-pz-checking]::before { animation: none; } }';
+                    '@media (prefers-reduced-motion: reduce) { [data-pz-checking] > i { animation: none !important; } }';
                 doc.head.appendChild(style);
             }
             const styles = new Map();
             for (const element of [button, toggle].filter(Boolean)) {
-                styles.set(element, ['background-color', 'background-image', 'border-color', 'color'].map(property =>
+                styles.set(element, ['background-color', 'background-image', 'border-color', 'border-left-color', 'color'].map(property =>
                     [property, element.style.getPropertyValue(property), element.style.getPropertyPriority(property)]));
             }
             mainControl = { button, handler, styles, vm,
@@ -292,6 +293,13 @@
                 if (value) element.style.setProperty('background-image', value, priority);
                 else element.style.removeProperty('background-image');
             }
+            // 给小箭头保留原生分隔线，纯色背景下也能看清主按钮的边界。
+            if (element === toggle && target === 3) element.style.setProperty('border-left-color', '#1baa80', 'important');
+            else {
+                const [, value, priority] = mainControl.styles.get(element).find(([property]) => property === 'border-left-color');
+                if (value) element.style.setProperty('border-left-color', value, priority);
+                else element.style.removeProperty('border-left-color');
+            }
         }
     }
 
@@ -300,6 +308,7 @@
         syncPaging();
         rememberPagingURL();
         syncEmptySaving();
+        syncOrdinarySaving();
         syncCodeHints();
         if (!/^\/projects\/\d+\/strings\/?$/.test(page.location.pathname)) {
             unmount();
@@ -377,6 +386,55 @@
         if (scheduled) return;
         scheduled = true;
         page.requestAnimationFrame(sync);
+    }
+
+    // ===== 功能：所有状态的普通保存按钮始终使用当前编辑器 =====
+    function detachOrdinarySaving() {
+        if (!ordinarySaveControl) return;
+        ordinarySaveControl.button.removeEventListener('click', ordinarySaveControl.handler, true);
+        ordinarySaveControl = null;
+    }
+
+    function syncOrdinarySaving() {
+        const vm = /^\/projects\/\d+\/strings\/?$/.test(page.location.pathname) ? editorVM() : null;
+        const host = vm && doc.querySelector('.string-editor');
+        const dropdown = host?.querySelector?.('.right.text-right .b-dropdown') || host?.querySelector?.('.b-dropdown');
+        const button = [...(dropdown?.parentElement?.children || [])].find(el =>
+            el.tagName === 'BUTTON' && el.classList.contains('btn'));
+        if (ordinarySaveControl && (ordinarySaveControl.vm !== vm || ordinarySaveControl.button !== button ||
+            !ordinarySaveControl.button.isConnected)) detachOrdinarySaving();
+        if (!vm || !button || typeof vm.saveItem !== 'function') return;
+        if (!ordinarySaveControl) {
+            const control = { vm, button, inFlight: false, handler: null };
+            const handler = async event => {
+                const current = editorVM();
+                // 没有译文修改时仍由原生检查/审核处理，不把保存变成再次审核。
+                if (current !== vm || !button.isConnected || !current.canSave) return;
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                if (pending || current.saving || control.inFlight || !current.canEdit) return;
+                restoreMainButton();
+                control.inFlight = true;
+                button.disabled = true;
+                // 不沿用按钮重绘前绑定的处理方法；初始就是已检查/已审核的词条也走此入口。
+                try {
+                    await current.saveItem();
+                } catch (error) {
+                    tell(current, 'error', error?.message || '保存失败，请稍后重试');
+                } finally {
+                    control.inFlight = false;
+                    if (ordinarySaveControl === control) syncOrdinarySaving();
+                }
+            };
+            control.handler = handler;
+            ordinarySaveControl = control;
+            button.addEventListener('click', handler, true);
+            vm.$once?.('hook:beforeDestroy', () => {
+                if (ordinarySaveControl?.vm === vm) detachOrdinarySaving();
+            });
+        }
+        // 修复旧检查按钮遗留的禁用状态，只在网站确认当前译文可保存时恢复点击。
+        if (vm.canSave && vm.canEdit) button.disabled = Boolean(pending || vm.saving || ordinarySaveControl.inFlight);
     }
 
     // ===== 功能：普通保存空译文时，保留当前状态 =====
@@ -852,5 +910,9 @@
     doc.addEventListener('input', event => {
         if (event.target?.closest?.('.string-editor')) schedule();
     }, true);
+    // 冒泡阶段在页面的 v-model 更新之后运行，不必等下一次轮询才恢复保存。
+    doc.addEventListener('input', event => {
+        if (event.target?.closest?.('.string-editor')) syncOrdinarySaving();
+    });
 
 })();
