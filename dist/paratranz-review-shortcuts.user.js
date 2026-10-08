@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.8.5
+// @version      1.8.6
 // @description  检查与审核、空译文保存、空白格式检查、标点锁定、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
 // @match        https://paratranz.cn/projects/*/strings*
 // @match        https://paratranz.cn/projects/*/issues*
@@ -2150,7 +2150,7 @@
         placeLaunch(ctx);syncEditor(editor());syncNativeList();render();
     }
     const api = {
-        version: '1.8.4', sync, open: openOverview, managesRoute: managed,
+        version: '1.8.6', sync, open: openOverview, managesRoute: managed,
         groups() { return copy(state().groups); }, createGroup,
         assignment(id) { return state().assignments[String(id)] || ''; }, assign,
         destroy() { destroyed = true;request++;for (const binding of [...bindings.values()]) unbind(binding);for (const binding of [...nativeLists.values()]) disposeList(binding);teardown();doc.removeEventListener('click', dismiss);doc.removeEventListener('keydown', dismiss);page.removeEventListener?.('storage', storageChanged);if (page.ParaTranzDisputeGroups === api) delete page.ParaTranzDisputeGroups; }
@@ -2183,7 +2183,7 @@
                 '.pz-dg-button{border:0;background:transparent;color:#007bff;padding:5px 8px;cursor:pointer;font:inherit}.pz-dg-panel input,.pz-dg-panel select,.pz-dg-editor-group select,.pz-dg-choices input{font:inherit;border:1px solid #adb5bd66;border-radius:5px;padding:5px 8px;background:transparent;color:inherit;max-width:100%}.pz-dg-muted{color:#6c757d}.pz-dg-status:empty{display:none}.pz-dg-status{color:#b42318;margin:8px 0}' +
                 '.pz-dg-rows{max-height:55vh;overflow:auto}.pz-dg-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #adb5bd33}.pz-dg-row-text{flex:1;min-width:0}.pz-dg-row-text>a,.pz-dg-row-text>small{display:block;overflow-wrap:anywhere;white-space:pre-wrap}.pz-dg-row .pz-dg-picker{width:160px;flex-shrink:0}.pz-dg-picker>select{width:100%}.pz-dg-picker .pz-dg-create input{min-width:0;width:100%}' +
                 '.pz-dg-menu-row{position:relative}.pz-dg-target{padding-right:42px!important}.pz-dg-arrow{display:flex;align-items:center;justify-content:center;position:absolute;right:6px;top:3px;width:30px;height:30px;border:0;border-radius:5px;background:transparent;color:#007bff;cursor:pointer;font-size:20px;line-height:1}.pz-dg-choices{position:absolute;right:0;top:100%;z-index:1080;width:240px;max-width:85vw;max-height:320px;overflow:auto;padding:10px;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);border:1px solid #adb5bd66;border-radius:6px;box-shadow:0 5px 16px #0002}' +
-                '.pz-dg-create>button{flex:0 0 auto;white-space:nowrap}.pz-dg-create>input{flex:1 1 0;min-width:0}.pz-dg-choices{width:240px;padding:6px;font-size:.875rem;border-radius:8px}.pz-dg-choice-title{padding:6px 8px;font-size:.8em;color:#6c757d}.pz-dg-choices>.pz-dg-button.pz-dg-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 8px;border-radius:4px;line-height:1.4;color:inherit}.pz-dg-choice:hover,.pz-dg-choice:focus-visible{background:#007bff0d;color:#007bff}.pz-dg-choice-name{min-width:0;overflow-wrap:anywhere}.pz-dg-choice-count{flex:0 0 auto;font-size:.85em;color:#6c757d;font-variant-numeric:tabular-nums}.pz-dg-choices>.pz-dg-create{border-top:1px solid #adb5bd33;padding:10px 2px 2px;margin:6px 0 0;gap:6px}.pz-dg-choices>.pz-dg-create>input{width:0}.pz-dg-choices>.pz-dg-create>button{padding:5px 8px;color:#007bff}.pz-dg-choices>.pz-dg-button{display:block;width:100%;text-align:left}.pz-dg-choices .pz-dg-create{flex-wrap:nowrap}.pz-dg-choices input{min-width:0;width:100%}.pz-dg-editor-group{margin:10px 0;font-size:.875rem}' +
+                '.pz-dg-create>button{flex:0 0 auto;white-space:nowrap}.pz-dg-create>input{flex:1 1 0;min-width:0}.pz-dg-choices{width:240px;padding:6px;font-size:.875rem;border-radius:8px}.pz-dg-choice-title,.pz-dg-choices>small.pz-dg-muted{display:block;padding:6px 8px;font-size:.8em;line-height:1.4;color:#6c757d}.pz-dg-choices>.pz-dg-button.pz-dg-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 8px;border-radius:4px;line-height:1.4;color:inherit}.pz-dg-choice:hover,.pz-dg-choice:focus-visible{background:#007bff0d;color:#007bff}.pz-dg-choice-name{min-width:0;overflow-wrap:anywhere}.pz-dg-choice-count{flex:0 0 auto;font-size:.85em;color:#6c757d;font-variant-numeric:tabular-nums}.pz-dg-choices>.pz-dg-create{border-top:1px solid #adb5bd33;padding:10px 2px 2px;margin:6px 0 0;gap:6px}.pz-dg-choices>.pz-dg-create>input{width:0}.pz-dg-choices>.pz-dg-create>button{padding:5px 8px;color:#007bff}.pz-dg-choices>.pz-dg-button{display:block;width:100%;text-align:left}.pz-dg-choices .pz-dg-create{flex-wrap:nowrap}.pz-dg-choices input{min-width:0;width:100%}.pz-dg-editor-group{margin:10px 0;font-size:.875rem}' +
                 '.pz-dg-pagination{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding-top:12px}.pz-dg-page-controls{display:flex;align-items:center;gap:6px}.pz-dg-page-button{background:transparent;color:#007bff;border:1px solid #adb5bd66;padding:5px 10px;border-radius:5px;font:inherit;cursor:pointer}.pz-dg-page-button:disabled{color:#6c757d;opacity:.5;cursor:default}.pz-dg-page-controls input{width:62px;text-align:center}' +
                 '.pz-dg-modal{z-index:1050;overflow:auto}.pz-dg-backdrop{z-index:1040}.pz-dg-modal .pz-dg-head{display:none}.pz-dg-modal .pz-dg-panel{margin:0;padding:0;border:0}.pz-dg-modal .modal-body{padding:1rem}.pz-dg-modal .pz-dg-rows{max-height:50vh}.pz-dg-modal .pz-dg-launch{display:none}' +
                 '.pz-dg-modal{display:flex!important;align-items:center;justify-content:center;padding:20px;font-size:14px}.pz-dg-modal .modal-dialog{width:100%;max-width:560px;margin:0;max-height:calc(100vh - 40px)}.pz-dg-modal .modal-content{max-height:calc(100vh - 40px);border-radius:10px;border:1px solid #adb5bd55;overflow:hidden;box-shadow:0 12px 48px #0003}.pz-dg-modal .modal-header{padding:14px 20px;align-items:center}.pz-dg-modal .modal-title{font-size:16px;font-weight:600;line-height:1.4}.pz-dg-modal .close{margin:0;padding:0;width:28px;height:28px;font-size:24px;line-height:1;opacity:.6}.pz-dg-modal .modal-body{padding:16px 20px;overflow:auto;min-height:0}.pz-dg-modal .modal-footer{padding:10px 20px}.pz-dg-modal .modal-footer .btn{font-size:14px;padding:6px 16px}.pz-dg-modal .pz-dg-panel{font-size:inherit}.pz-dg-modal .pz-dg-mode{font-size:12px;gap:8px;border-bottom:1px solid #adb5bd33;padding-bottom:12px;margin-bottom:12px}.pz-dg-mode-badge{background:#6c757d12;border-radius:4px;padding:3px 7px}.pz-dg-modal .pz-dg-share{margin-left:auto;font-size:12px;padding:4px 8px}.pz-dg-modal .pz-dg-tools{margin:0;gap:6px}.pz-dg-modal .pz-dg-tools>select{flex:1;min-width:130px;width:0;height:34px}.pz-dg-modal .pz-dg-button{padding:6px 8px;line-height:1.4;white-space:nowrap}.pz-dg-modal .pz-dg-secondary{border:1px solid #adb5bd66;border-radius:5px;color:#6c757d}.pz-dg-modal .pz-dg-danger{color:#c54545}.pz-dg-modal .pz-dg-rename{flex-basis:100%;margin:4px 0 0;padding:10px;background:#f8f9fa;border-radius:6px}.pz-dg-modal .pz-dg-rename>input{flex:1;min-width:100px;width:0}.pz-dg-modal .pz-dg-new-group{margin:12px 0;flex-wrap:nowrap;padding:10px;border:1px solid #adb5bd33;border-radius:6px;background:#f8f9fa}.pz-dg-modal .pz-dg-new-group>input{flex:1;min-width:0;width:0;background:var(--pt-bg,#fff)}.pz-dg-modal .pz-dg-new-group>button{background:#007bff;color:white;border-radius:5px;padding:6px 12px}.pz-dg-modal .pz-dg-rows{max-height:min(360px,42vh)}.pz-dg-modal .pz-dg-row{padding:10px 0;gap:12px}.pz-dg-modal .pz-dg-row .pz-dg-picker{width:128px}.pz-dg-modal .pz-dg-row-text>a{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;overflow:hidden;line-height:1.5}.pz-dg-modal .pz-dg-row-text>small{white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:12px;margin-top:3px}.pz-dg-empty{padding:24px 12px;text-align:center;color:#6c757d;border-radius:6px;background:#f8f9fa}.pz-dg-empty strong{display:block;font-size:14px;font-weight:500}.pz-dg-empty small{display:block;font-size:12px;line-height:1.5;margin-top:6px}.pz-dg-modal .pz-dg-pagination{font-size:12px;gap:8px;border-top:1px solid #adb5bd33;margin-top:8px;padding-top:10px}.pz-dg-pagination:empty{display:none}.pz-dg-modal .pz-dg-page-controls{gap:3px}.pz-dg-modal .pz-dg-page-controls input{width:42px;padding:4px}.pz-dg-modal .pz-dg-page-button{padding:4px 7px}@media(max-width:480px){.pz-dg-modal{padding:12px}.pz-dg-modal .modal-body{padding:12px}.pz-dg-modal .modal-header,.pz-dg-modal .modal-footer{padding:12px}.pz-dg-modal .pz-dg-row{align-items:flex-start}.pz-dg-modal .pz-dg-row .pz-dg-picker{width:100px}.pz-dg-modal .pz-dg-pagination{justify-content:center}.pz-dg-modal .pz-dg-mode small{flex:1}}' +
@@ -2218,28 +2218,25 @@
         const issues = [], equalBodies = meaningfulSource.length === meaningfulTarget.length;
         const spaceName = value => {
             const spaces = [...value].filter(char => char === ' ').length, tabs = [...value].filter(char => char === '\t').length, other = value.length - spaces - tabs;
-            return [spaces && `${spaces} 个空格`, tabs && `${tabs} 个制表符`, other && `${other} 个其他空白`].filter(Boolean).join('、') || '无空白';
+            return [spaces && `${spaces}个空格`, tabs && `${tabs}个制表符`, other && `${other}个其他空白`].filter(Boolean).join('、') || '无空白';
         };
         let index = 0;
-        for (const [i, line] of sourceLines.entries()) {
-            if (line.blank) continue;
-            const translated = equalBodies ? meaningfulTarget[index++] : targetLines[i];if (!translated || translated.blank) continue;
-            if (line.before !== translated.before) issues.push(`第 ${i + 1} 行行首缩进不同：原文${spaceName(line.before)}，译文${spaceName(translated.before)}`);
-            if (line.after !== translated.after) issues.push(`第 ${i + 1} 行行尾空白不同：原文${spaceName(line.after)}，译文${spaceName(translated.after)}`);
+        for (const [i, translated] of targetLines.entries()) {
+            if (translated.blank) continue;
+            const line = equalBodies ? meaningfulSource[index++] : sourceLines[i];if (!line || line.blank) continue;
+            if (line.before !== translated.before) issues.push(`第${i + 1}行行首缩进不同：原文${spaceName(line.before)}，译文${spaceName(translated.before)}`);
+            if (line.after !== translated.after) issues.push(`第${i + 1}行行尾空白不同：原文${spaceName(line.after)}，译文${spaceName(translated.after)}`);
         }
-        const sameBlankLayout = sourceLines.length === targetLines.length && sourceLines.every((line, i) => line.blank === targetLines[i].blank);
-        if (!sameBlankLayout && (sourceLines.some(line => line.blank) || targetLines.some(line => line.blank))) issues.push('译文的空行数量或位置与原文不同');
-        else if (sameBlankLayout && sourceLines.some((line, i) => line.blank && source[i * 2] !== target[i * 2])) issues.push('空行中的空白字符与原文不同');
-        if (!equalBodies && issues.length) issues.push('正文行数不同，无法仅通过调整空白修复');
         let fixed = translation;
-        // 不拼接正文行。带自定义换行标签时，也不增删标签来修复空行。
-        const repairable = equalBodies && (!custom || sourceLines.length === targetLines.length && sameBlankLayout);
+        // 只修复非空正文行的首尾空格，原样保留译文的空行和全部换行分隔符。
+        const repairable = equalBodies;
         if (repairable) {
             index = 0;
-            const eol = target.find((_, i) => i % 2 === 1) || source.find((_, i) => i % 2 === 1) || '\n';
-            const separators = target.filter((_, i) => i % 2 === 1);
-            const rebuilt = sourceLines.map((line, i) => line.blank ? source[i * 2] : line.before + meaningfulTarget[index++].body + line.after);
-            fixed = rebuilt.map((line, i) => line + (i < rebuilt.length - 1 ? custom ? separators[i] : eol : '')).join('');
+            fixed = target.map((segment, i) => {
+                if (i % 2 === 1 || targetLines[i / 2].blank) return segment;
+                const originalLine = meaningfulSource[index++];
+                return originalLine.before + targetLines[i / 2].body + originalLine.after;
+            }).join('');
         }
         return { issues, fixed, repairable: repairable && fixed !== translation };
     }
@@ -2323,7 +2320,6 @@
         binding.wrapper = function(...args) {
             if (binding.checking) return false;
             const value = prefs(this), captured = snapshot(this), analysis = value.spaces ? { issues: [] } : inspect(captured.original, captured.text, this.lineBreakChar);
-            if (value.lines) analysis.issues = analysis.issues.filter(issue => !/空行数量或位置|正文行数/.test(issue));
             let result;
             try { result = nativeCheck(this, binding.original, args, value); } catch (error) { throw error; }
             if (!analysis.issues.length) return result;
@@ -2350,7 +2346,7 @@
         vm.onTranslationChange?.(analysis.fixed);
         // 本次保存按取消处理，避免保存入口使用修复前的文本快照继续提交。
         vm.onConfirmCancel?.();vm.$bvModal?.hide?.('tagConfirm');removeUI(binding);
-        vm.$alert?.success?.('空白格式已修复，请重新点击保存');
+        vm.$alert?.success?.('首尾空格已修复，请重新点击保存');
     }
     function sync() {
         if (destroyed) return;
@@ -2364,20 +2360,23 @@
         const stamp = JSON.stringify([nativeWarnings, check.captured.id, check.captured.text, check.analysis.issues, usable]);
         if (binding.ui?.isConnected && binding.ui.parentElement === body && binding.stamp === stamp) return;
         removeUI(binding);binding.stamp = stamp;
-        const ui = node('section', null, 'pz-whitespace-check' + (nativeWarnings ? '' : ' pz-whitespace-only')), heading = node('div', null, 'pz-whitespace-heading');
-        heading.append(node('i', null, 'far fa-exclamation-circle'), node('strong', '空白格式检查'));
-        const list = node('ul');for (const issue of check.analysis.issues.slice(0, 6)) list.append(node('li', issue));
-        if (check.analysis.issues.length > 6) list.append(node('li', `另有 ${check.analysis.issues.length - 6} 处空白格式不同`));
+        const ui = node('section', null, 'pz-whitespace-check' + (nativeWarnings ? '' : ' pz-whitespace-only'));
+        const warning = text => {
+            const row = node('div', null, 'pz-whitespace-warning');
+            row.append(node('i', null, 'far fa-exclamation-circle'), node('span', text));ui.append(row);
+        };
+        for (const issue of check.analysis.issues.slice(0, 6)) warning(issue);
+        if (check.analysis.issues.length > 6) warning(`另有${check.analysis.issues.length - 6}处首尾空格不同`);
         const controls = node('div', null, 'pz-whitespace-actions'), fix = node('button', '修复空格', 'btn btn-outline-primary btn-sm');fix.type = 'button';fix.disabled = !usable || !check.analysis.repairable;
         fix.addEventListener('click', event => { event.preventDefault();event.stopPropagation();repair(binding); });
-        controls.append(fix, node('small', check.analysis.repairable ? '按原文恢复缩进及行尾空白；修复后重新保存' : '正文行或换行标签不同，需手动调整'));
-        ui.append(heading, list, controls);body.append(ui);binding.ui = ui;
+        controls.append(fix, node('small', check.analysis.repairable ? '按原文恢复缩进及行尾空格；修复后重新保存' : '正文行无法对应，需手动调整空格'));
+        ui.append(controls);body.append(ui);binding.ui = ui;
     }
-    const api = { version: '1.8.4', inspect, sync, destroy() { destroyed = true;for (const binding of [...bindings.values()]) unbind(binding);if (page.ParaTranzWhitespaceCheck === api) delete page.ParaTranzWhitespaceCheck; } };
+    const api = { version: '1.8.6', inspect, sync, destroy() { destroyed = true;for (const binding of [...bindings.values()]) unbind(binding);if (page.ParaTranzWhitespaceCheck === api) delete page.ParaTranzWhitespaceCheck; } };
     page.ParaTranzWhitespaceCheck = api;
     function start() {
         if (!doc.getElementById('pz-whitespace-check-style')) {
-            const style = node('style');style.id = 'pz-whitespace-check-style';style.textContent = '.pz-whitespace-check{margin-top:14px;padding-top:12px;border-top:1px solid #adb5bd55;font-size:.875rem}.pz-whitespace-only{margin-top:0;padding-top:0;border-top:0}.pz-check-original{display:none!important}.pz-check-options>.custom-control+.custom-control{margin-top:.5rem}.pz-whitespace-heading{display:flex;align-items:center;gap:7px}.pz-whitespace-heading strong{font-weight:500}.pz-whitespace-check ul{padding-left:22px;margin:8px 0;line-height:1.6}.pz-whitespace-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.pz-whitespace-actions small{color:#6c757d}';doc.head?.append(style);
+            const style = node('style');style.id = 'pz-whitespace-check-style';style.textContent = '.pz-whitespace-check{margin-top:12px;font-size:inherit;line-height:inherit}.pz-whitespace-only{margin-top:0}.pz-check-original{display:none!important}.pz-check-options>.custom-control+.custom-control{margin-top:.5rem}.pz-whitespace-warning{display:flex;align-items:baseline;gap:.4em;font:inherit}.pz-whitespace-warning+.pz-whitespace-warning{margin-top:8px}.pz-whitespace-warning>i{flex:0 0 auto}.pz-whitespace-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px}.pz-whitespace-actions small{color:#6c757d}';doc.head?.append(style);
         }
         sync();
     }

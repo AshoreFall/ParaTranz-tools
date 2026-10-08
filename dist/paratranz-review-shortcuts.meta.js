@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.8.5
+// @version      1.8.6
 // @description  检查与审核、空译文保存、空白格式检查、标点锁定、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
 // @match        https://paratranz.cn/projects/*/strings*
 // @match        https://paratranz.cn/projects/*/issues*
