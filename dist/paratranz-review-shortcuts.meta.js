@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.7.0
-// @description  检查与审核、空译文保存、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及手动创建疑问分组。
+// @version      1.8.0
+// @description  检查与审核、空译文保存、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
 // @match        https://paratranz.cn/projects/*/strings*
 // @match        https://paratranz.cn/projects/*/issues*
 // @grant        unsafeWindow
