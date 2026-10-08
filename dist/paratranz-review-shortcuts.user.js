@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.8.0
+// @version      1.8.1
 // @description  检查与审核、空译文保存、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
 // @match        https://paratranz.cn/projects/*/strings*
 // @match        https://paratranz.cn/projects/*/issues*
@@ -860,7 +860,8 @@
         const data = vm.strings;
         if (vm.loading || !Array.isArray(data?.results)) return;
         const actualPage = positiveNumber(data.page), actualSize = positiveNumber(data.pageSize, 800);
-        const mismatch = !actualPage || actualSize !== plan.size || (plan.current && actualPage !== plan.current);
+        const grouped = page.ParaTranzDisputeGroups?.managesRoute?.(vm.$route.query);
+        const mismatch = !actualPage || actualSize !== plan.size || (!grouped && plan.current && actualPage !== plan.current);
         if (mismatch) {
             state.mismatchSince ??= Date.now();
             const editor = editorVM();
@@ -1806,7 +1807,7 @@
             clearUI(binding);
             if (target?.parentElement && target.closest('.dropdown-menu')) {
                 binding.target = target;target.classList.add('pz-dg-target');
-                binding.arrow = button('⌄', () => showChoices(binding), 'pz-dg-arrow');binding.arrow.setAttribute('aria-label', '选择疑问分组');binding.arrow.title = '选择疑问分组';
+                binding.arrow = button('', () => showChoices(binding), 'pz-dg-arrow');binding.arrow.setAttribute('aria-label', '选择疑问分组');binding.arrow.title = '选择疑问分组';
                 binding.popup = node('div', null, 'pz-dg-choices');binding.popup.hidden = true;
                 const parent = target.parentElement;parent.classList.add('pz-dg-menu-row');parent.append(binding.arrow, binding.popup);
             }
@@ -1874,13 +1875,7 @@
         if (managed(vm.$route.query) && binding.handled !== vm.$route.fullPath && !vm.loading && !active?.canSave && !active?.saving && typeof vm.initStrings === 'function') {
             const route = vm.$route.fullPath;binding.handled = route;Promise.resolve(vm.initStrings()).then(() => { if (!vm.loading && !binding.disposed && vm.$route.fullPath === route && !editor()?.canSave && !editor()?.saving) vm.onLoad?.(); }).catch(report);
         }
-        // 网站页码优先读地址。分组条数变少或首次进入时，同步实际页与每页十条。
-        if (managed(vm.$route.query) && !vm.loading && !active?.canSave && !active?.saving && vm.strings === binding.result &&
-            (Number(vm.$route.query.page || 1) !== vm.strings.page || Number(vm.$route.query.pageSize || 50) !== PAGE_SIZE) && typeof vm.$router?.replace === 'function' && binding.normalizing !== vm.$route.fullPath) {
-            binding.normalizing = vm.$route.fullPath;
-            const query = { ...vm.$route.query, page: String(vm.strings.page), pageSize: String(PAGE_SIZE) };delete query.anchor;
-            Promise.resolve(vm.$router.replace({ query })).catch(report);
-        }
+        // 地址同步由已有的分页修复统一处理，避免两个 replace 请求互相取消。
         if (managed(vm.$route.query)) for (const select of doc.querySelectorAll('.strings .pagination-footer select')) {
             if (![...select.options].some(option => option.value === '10')) { const option = node('option', '10');option.value = '10';select.prepend(option); }
             if (Number(vm.strings?.pageSize) === 10 && select.value !== '10') select.value = '10';
@@ -1899,7 +1894,11 @@
         const ctx = context();if (sharing) await refreshShared(ctx);
         if (!mounted?.routeMenu?.isConnected) return;
         const menu = mounted.routeMenu;menu.replaceChildren();
-        for (const group of [{ id: 'all', name: '全部疑问' }, { id: 'none', name: '未分组' }, ...state(ctx).groups]) menu.append(button(group.name, () => goGroup(group.id, ctx), 'dropdown-item'));
+        const selected = String(listVM()?.$route.query.pzGroup || 'all');
+        for (const group of [{ id: 'all', name: '全部疑问' }, { id: 'none', name: '未分组' }, ...state(ctx).groups]) {
+            const item = button(group.name, () => goGroup(group.id, ctx), 'dropdown-item');
+            if (group.id === selected) { item.classList.add('pz-dg-selected');item.setAttribute('aria-current', 'true'); }menu.append(item);
+        }
         menu.append(node('div', null, 'dropdown-divider'), button('管理分组', () => { menu.hidden = true;return openOverview(); }, 'dropdown-item'));menu.hidden = false;mounted.launch.setAttribute('aria-expanded', 'true');
     }
     // ---- 管理分组时读取全部疑问词条，列表每页显示十条 ----
@@ -2043,9 +2042,11 @@
             return;
         }
         const breadcrumb = host.querySelector('.breadcrumb');
+        if (mounted.breadcrumb !== breadcrumb) { mounted.breadcrumb?.classList.remove('pz-dg-browse-host');mounted.breadcrumb = breadcrumb; }
         if (!breadcrumb) { launch.hidden = true;return; }
         const disputed = [...breadcrumb.querySelectorAll('.breadcrumb-item')].find(element => /^(有疑问|Disputed)/.test(element.textContent.trim()));
-        launch.hidden = !disputed;launch.textContent = '⌄';launch.classList.toggle('pz-dg-browse-arrow', !!disputed);
+        breadcrumb.classList.toggle('pz-dg-browse-host', !!disputed);
+        launch.hidden = !disputed;launch.textContent = '';launch.classList.toggle('pz-dg-browse-arrow', !!disputed);
         launch.setAttribute('aria-label', '选择疑问分组');launch.title = '选择疑问分组';
         if (mounted.crumb !== disputed) {
             mounted.crumb?.classList.remove('pz-dg-crumb');mounted.crumb = disputed;mounted.routeMenu.hidden = true;
@@ -2058,7 +2059,7 @@
         if (mounted) {
             if (mounted.overlay) closeOverview();
             mounted.reference?.removeEventListener('click', mounted.referenceClick, true);
-            mounted.crumb?.classList.remove('pz-dg-crumb');mounted.launch.remove();mounted.routeMenu.remove();mounted.groupLabel.remove();mounted.panel.remove();mounted.status.remove();mounted.slot?.remove();
+            mounted.breadcrumb?.classList.remove('pz-dg-browse-host');mounted.crumb?.classList.remove('pz-dg-crumb');mounted.launch.remove();mounted.routeMenu.remove();mounted.groupLabel.remove();mounted.panel.remove();mounted.status.remove();mounted.slot?.remove();
         }
         mounted = null;signature = '';
     }
@@ -2092,7 +2093,7 @@
         placeLaunch(ctx);syncEditor(editor());syncNativeList();render();
     }
     const api = {
-        version: '1.8.0', sync, open: openOverview, managesRoute: managed,
+        version: '1.8.1', sync, open: openOverview, managesRoute: managed,
         groups() { return copy(state().groups); }, createGroup,
         assignment(id) { return state().assignments[String(id)] || ''; }, assign,
         destroy() { destroyed = true;request++;for (const binding of [...bindings.values()]) unbind(binding);for (const binding of [...nativeLists.values()]) disposeList(binding);teardown();doc.removeEventListener('click', dismiss);doc.removeEventListener('keydown', dismiss);page.removeEventListener?.('storage', storageChanged);if (page.ParaTranzDisputeGroups === api) delete page.ParaTranzDisputeGroups; }
@@ -2120,11 +2121,11 @@
     function start() {
         if (!doc.getElementById('pz-dispute-group-style')) {
             const style = node('style');style.id = 'pz-dispute-group-style';style.textContent =
-                '.pz-dg-panel[hidden],.pz-dg-launch[hidden],.pz-dg-choices[hidden],.pz-dg-create[hidden],.pz-dg-route-menu[hidden]{display:none!important}.pz-dg-launch{margin:0 0 0 10px;padding:3px 8px;border:1px solid #007bff;border-radius:5px;background:transparent;color:#007bff;font-size:.875em;cursor:pointer;vertical-align:middle}.pz-dg-crumb{position:relative}.pz-dg-launch.pz-dg-browse-arrow{margin-left:4px;padding:0 5px;border:0;color:inherit;font-size:1.2em;line-height:1;vertical-align:baseline}.pz-dg-route-menu{top:100%;left:auto;right:0;min-width:180px;max-height:320px;overflow:auto;z-index:1030}.pz-dg-group-label{color:inherit}' +
+                '.pz-dg-panel[hidden],.pz-dg-launch[hidden],.pz-dg-choices[hidden],.pz-dg-create[hidden],.pz-dg-route-menu[hidden]{display:none!important}.pz-dg-launch{margin:0 0 0 10px;padding:3px 8px;border:1px solid #007bff;border-radius:5px;background:transparent;color:#007bff;font-size:.875em;cursor:pointer;vertical-align:middle}.pz-dg-crumb{position:relative}.pz-dg-browse-host{position:relative;padding-right:44px!important}.pz-dg-browse-host>.pz-dg-crumb{position:static}.pz-dg-browse-host .pz-dg-browse-arrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin:0}.pz-dg-launch.pz-dg-browse-arrow{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-left:4px;padding:0;border:0;border-radius:4px;color:inherit;background:transparent;vertical-align:middle;line-height:1}.pz-dg-browse-arrow::after,.pz-dg-arrow::after{content:"";display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid currentColor}.pz-dg-browse-arrow[aria-expanded="true"]::after{transform:rotate(180deg)}.pz-dg-browse-arrow:hover{background:#6c757d12}.pz-dg-browse-arrow:focus-visible{outline:2px solid #007bff;outline-offset:2px}.pz-dg-route-menu{top:calc(100% + 6px);left:auto;right:0;width:max-content;min-width:132px;max-width:min(260px,85vw);max-height:320px;overflow:auto;padding:4px;border:1px solid #adb5bd55;border-radius:8px;box-shadow:0 4px 16px #00000014;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);font-size:.875rem;z-index:1030}.pz-dg-route-menu>.dropdown-item{padding:5px 12px;border-radius:4px;font:inherit;line-height:1.4;white-space:normal;overflow-wrap:anywhere}.pz-dg-route-menu>.dropdown-item:hover,.pz-dg-route-menu>.dropdown-item:focus-visible{background:#007bff0d;color:#007bff}.pz-dg-route-menu>.pz-dg-selected{background:#007bff12;color:#007bff}.pz-dg-route-menu>.dropdown-divider{margin:4px 8px;border-color:#adb5bd33}.pz-dg-group-label{color:inherit}' +
                 '.pz-dg-panel{margin:10px 0 16px;padding:14px;border:1px solid #adb5bd55;border-radius:8px;font-size:.875rem}.pz-dg-head,.pz-dg-tools,.pz-dg-create,.pz-dg-editor-group{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.pz-dg-head{justify-content:space-between;margin-bottom:4px}.pz-dg-tools{margin-top:12px}.pz-dg-create{margin:10px 0}' +
                 '.pz-dg-button{border:0;background:transparent;color:#007bff;padding:5px 8px;cursor:pointer;font:inherit}.pz-dg-panel input,.pz-dg-panel select,.pz-dg-editor-group select,.pz-dg-choices input{font:inherit;border:1px solid #adb5bd66;border-radius:5px;padding:5px 8px;background:transparent;color:inherit;max-width:100%}.pz-dg-muted{color:#6c757d}.pz-dg-status:empty{display:none}.pz-dg-status{color:#b42318;margin:8px 0}' +
                 '.pz-dg-rows{max-height:55vh;overflow:auto}.pz-dg-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #adb5bd33}.pz-dg-row-text{flex:1;min-width:0}.pz-dg-row-text>a,.pz-dg-row-text>small{display:block;overflow-wrap:anywhere;white-space:pre-wrap}.pz-dg-row .pz-dg-picker{width:160px;flex-shrink:0}.pz-dg-picker>select{width:100%}.pz-dg-picker .pz-dg-create input{min-width:0;width:100%}' +
-                '.pz-dg-menu-row{position:relative}.pz-dg-target{padding-right:42px!important}.pz-dg-arrow{position:absolute;right:6px;top:3px;width:30px;height:30px;border:0;border-radius:5px;background:transparent;color:#007bff;cursor:pointer;font-size:20px;line-height:1}.pz-dg-choices{position:absolute;right:0;top:100%;z-index:1080;width:240px;max-width:85vw;max-height:320px;overflow:auto;padding:10px;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);border:1px solid #adb5bd66;border-radius:6px;box-shadow:0 5px 16px #0002}' +
+                '.pz-dg-menu-row{position:relative}.pz-dg-target{padding-right:42px!important}.pz-dg-arrow{display:flex;align-items:center;justify-content:center;position:absolute;right:6px;top:3px;width:30px;height:30px;border:0;border-radius:5px;background:transparent;color:#007bff;cursor:pointer;font-size:20px;line-height:1}.pz-dg-choices{position:absolute;right:0;top:100%;z-index:1080;width:240px;max-width:85vw;max-height:320px;overflow:auto;padding:10px;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);border:1px solid #adb5bd66;border-radius:6px;box-shadow:0 5px 16px #0002}' +
                 '.pz-dg-choices>.pz-dg-button{display:block;width:100%;text-align:left}.pz-dg-choices .pz-dg-create{flex-wrap:nowrap}.pz-dg-choices input{min-width:0;width:100%}.pz-dg-editor-group{margin:10px 0;font-size:.875rem}' +
                 '.pz-dg-pagination{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding-top:12px}.pz-dg-page-controls{display:flex;align-items:center;gap:6px}.pz-dg-page-button{background:transparent;color:#007bff;border:1px solid #adb5bd66;padding:5px 10px;border-radius:5px;font:inherit;cursor:pointer}.pz-dg-page-button:disabled{color:#6c757d;opacity:.5;cursor:default}.pz-dg-page-controls input{width:62px;text-align:center}' +
                 '.pz-dg-modal{z-index:1050;overflow:auto}.pz-dg-backdrop{z-index:1040}.pz-dg-modal .pz-dg-head{display:none}.pz-dg-modal .pz-dg-panel{margin:0;padding:0;border:0}.pz-dg-modal .modal-body{padding:1rem}.pz-dg-modal .pz-dg-rows{max-height:50vh}.pz-dg-modal .pz-dg-launch{display:none}' +
