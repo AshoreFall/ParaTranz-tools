@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.6.0
+// @version      1.6.1
 // @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，代码术语和格式标签的悬浮说明，以及插件管理页。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
@@ -1119,26 +1119,33 @@
             status('这个插件已停用，请先启用。');return;
         }
         opened = true; selected = entry.id; unmask();
+        if (mounted) mounted.root.hidden = true;
         try {
             activating = true;
             if (typeof entry.open === 'function') await entry.open({ ...context() });
             else if (entry.tab?.isConnected) entry.tab.click();
             else throw new Error('插件入口暂未加载，请稍后再试');
-        } catch (error) { status(error?.message || '无法打开插件'); }
+        } catch (error) {
+            selected = null;signature = '';sync();status(error?.message || '无法打开插件');
+        }
         finally { activating = false; }
         page.requestAnimationFrame(async () => {
             if (!mounted || !opened || selected !== entry.id) return;
             const active = entries().find(item => item.id === entry.id) || entry;
             if (configure) {
                 if (typeof active.configure === 'function') {
-                    try { await active.configure({ ...context() }); } catch (error) { status(error?.message || '无法打开配置'); }
+                    try { await active.configure({ ...context() }); }
+                    catch (error) { selected = null;signature = '';sync();status(error?.message || '无法打开配置'); }
                 }
                 else {
-                    const settings = [...(active.panel?.querySelectorAll('button,a,[role="button"]') || [])].find(control =>
-                        /^(设置|配置(?:翻译)?|Settings|Configuration|Configure)$/i.test(control.textContent.trim()) ||
-                        /^(设置|配置|Settings)$/i.test(control.getAttribute('title') || control.getAttribute('aria-label') || ''));
+                    // 部分旧插件没有 aria-controls；打开后只寻找右侧当前可见的配置入口。
+                    const settings = [...((active.panel || mounted.sidebar).querySelectorAll('button,a,[role="button"]'))].find(control =>
+                        !control.closest('[data-pz-plugin-manager]') &&
+                        (active.panel || control.getClientRects?.().length > 0) &&
+                        (/^(设置|配置(?:翻译)?|Settings|Configuration|Configure)$/i.test(control.textContent.trim()) ||
+                        /^(设置|配置|Settings)$/i.test(control.getAttribute('title') || control.getAttribute('aria-label') || '')));
                     if (settings) settings.click();
-                    else status('已打开插件，请使用它自己的配置入口。');
+                    // 原插件已正常打开；不再插入遮挡面板的提示文字。
                 }
             }
             signature = ''; sync();
@@ -1198,28 +1205,29 @@
         card.append(head);
         const actions = node('div', null, 'pz-plugin-actions');
         actions.append(button('打开', () => openEntry(entry)), button('配置', () => openEntry(entry, true)));
-        const update = button('检查更新', () => checkUpdate(entry));
-        update.disabled = !safeURL(entry.updateURL) || !entry.version || !!updates.get(entry.id)?.pending;
-        actions.append(update);
+        if (safeURL(entry.updateURL) && entry.version) {
+            const update = button('检查更新', () => checkUpdate(entry));
+            update.disabled = !!updates.get(entry.id)?.pending;
+            actions.append(update);
+        }
         const updateState = updates.get(entry.id);
         if (updateState?.available && updateState.download) {
             const link = node('a', '更新', 'btn btn-sm btn-primary');link.href = updateState.download;link.target = '_blank';link.rel = 'noopener noreferrer';actions.append(link);
         } else if (safeURL(entry.homepage) && !entry.updateURL) {
             const link = node('a', '查看作者更新入口', 'btn btn-sm btn-outline-secondary');link.href = safeURL(entry.homepage);link.target = '_blank';link.rel = 'noopener noreferrer';actions.append(link);
         }
-        card.append(actions, node('p', updateState?.message || (entry.updateURL ? '可检查更新' : '插件未提供自动更新信息'), 'pz-plugin-update'));
+        card.append(actions);
+        if (updateState?.message) card.append(node('p', updateState.message, 'pz-plugin-update'));
         const rules = node('div', null, 'pz-plugin-rules');
         rules.append(toggle('收进插件页', state.collect, value => change(entry, { collect: value })));
         const canControl = typeof entry.setEnabled === 'function';
-        rules.append(scope === 'project'
+        if (canControl) rules.append(scope === 'project'
             ? toggle('排除本项目', state.excluded, value => change(entry, { excluded: value }), canControl)
             : toggle('启用插件', state.enabled, value => change(entry, { enabled: value }), canControl));
         const canConfigure = typeof entry.applyConfig === 'function' && schema.length > 0;
-        if (scope === 'project') rules.append(toggle('本项目独立设置', state.independent, value =>
+        if (scope === 'project' && canConfigure) rules.append(toggle('本项目独立设置', state.independent, value =>
             change(entry, { independent: value, config: value ? clone(effective(entry).config) : state.config }), canConfigure));
         card.append(rules);
-        if (!canControl || !canConfigure) card.append(node('p',
-            '已识别页面入口。项目停用和独立设置需要插件支持；收纳不会停止脚本运行。', 'text-muted pz-plugin-note'));
         if (entry.client?.failed) card.append(node('p', '设置应用失败，未确认运行状态。', 'pz-plugin-note'));
         if (canConfigure && (scope === 'global' || state.independent)) {
             const values = scope === 'global' ? Object.fromEntries(schema.map(field =>
@@ -1255,24 +1263,28 @@
     }
     function mount(sidebar, nav) {
         const item = node('li', null, 'nav-item');item.setAttribute('data-pz-plugin-manager', '');
-        const tab = node('button', '插件', 'nav-link');tab.type = 'button';tab.setAttribute('role', 'tab');tab.setAttribute('aria-selected', 'false');tab.addEventListener('click', show);item.append(tab);
+        // 原生页签是链接；沿用链接颜色，避免 button 默认黑字。
+        const tab = node('a', '插件', 'nav-link');tab.href = '#';tab.setAttribute('role', 'tab');tab.setAttribute('aria-selected', 'false');
+        tab.addEventListener('click', event => { event.preventDefault();show(); });item.append(tab);
         const root = node('section', null, 'pz-plugin-manager');root.setAttribute('data-pz-plugin-manager', '');root.hidden = true;
         const toolbar = node('div', null, 'pz-plugin-toolbar'), selector = node('select');
         for (const [value, label] of [['project', `项目 ${context().projectId}`], ['global', '全局设置']]) { const option = node('option', label);option.value = value;selector.append(option); }
         selector.value = scope;selector.addEventListener('change', () => { scope = selector.value;signature = '';queue(); });
         const checkAll = button('检查更新', () => { for (const entry of entries()) checkUpdate(entry); });
-        toolbar.append(selector, checkAll, button('返回插件列表', show));
+        toolbar.append(selector, checkAll);
         const message = node('p', '', 'pz-plugin-status'), list = node('div', null, 'pz-plugin-list');root.append(toolbar, message, list);
         const navClick = event => {
             const link = event.target?.closest?.('.nav-link,[role="tab"]');
             if (opened && !activating && link && link !== tab && nav.contains(link)) close();
         };
         nav.addEventListener('click', navClick, true);nav.append(item);nav.after(root);
-        mounted = { sidebar, nav, item, tab, root, list, status: message, navClick, selector };
+        mounted = { sidebar, nav, item, tab, root, list, status: message, navClick, selector, checkAll };
         if (!doc.getElementById('pz-plugin-manager-style')) {
             const style = node('style');style.id = 'pz-plugin-manager-style';style.textContent =
                 '[data-pz-plugin-collected],[data-pz-plugin-masked]{display:none!important}.pz-plugin-manager[hidden]{display:none!important}' +
-                '[data-pz-plugin-manager]>.nav-link{width:100%;border:0;cursor:pointer;background:transparent}' +
+                '[data-pz-plugin-manager]>.nav-link{width:100%;border:0;cursor:pointer;color:#007bff;background:transparent}' +
+                '[data-pz-plugin-manager]>.nav-link.active{color:#fff;background:#007bff}' +
+                '.pz-plugin-toolbar [hidden]{display:none!important}' +
                 '.pz-plugin-manager{margin-top:12px;color:inherit}.pz-plugin-toolbar,.pz-plugin-actions,.pz-plugin-rules{display:flex;align-items:center;flex-wrap:wrap;gap:8px}' +
                 '.pz-plugin-toolbar{margin-bottom:12px}.pz-plugin-toolbar select{padding:5px;border:1px solid #adb5bd;border-radius:6px;background:transparent;color:inherit}' +
                 '.pz-plugin-card{padding:14px;margin:0 0 12px;border:1px solid #adb5bd66;border-radius:8px}.pz-plugin-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}' +
@@ -1307,16 +1319,19 @@
         for (const item of sourceItems) if (!nextSources.has(item)) item.removeAttribute('data-pz-plugin-collected');
         for (const item of nextSources) if (!sourceItems.has(item)) item.setAttribute('data-pz-plugin-collected', '');
         sourceItems.clear();for (const item of nextSources) sourceItems.add(item);
-        mounted.root.hidden = !opened;
+        mounted.root.hidden = !opened || !!selected;
         if (opened) {
-            if (selected && !list.some(entry => entry.id === selected)) { selected = null;signature = ''; }
+            if (selected && !list.some(entry => entry.id === selected)) { selected = null;signature = '';mounted.root.hidden = false; }
+            mounted.checkAll.hidden = !list.some(entry => safeURL(entry.updateURL) && entry.version);
             mounted.tab.classList.add('active');
             if (mounted.tab.getAttribute('aria-selected') !== 'true') mounted.tab.setAttribute('aria-selected', 'true');
             hideNativeActive();mask();
             for (const entry of list) if (safeURL(entry.updateURL) && entry.version && !updates.has(entry.id)) checkUpdate(entry);
             const count = list.filter(entry => updates.get(entry.id)?.available).length;
             const label = count ? `插件 · ${count}` : '插件';if (mounted.tab.textContent !== label) mounted.tab.textContent = label;
-            const view = selected ? list.filter(entry => entry.id === selected) : list;
+            // 打开插件后只显示原插件面板；再次点“插件”页签即返回列表。
+            if (selected) return;
+            const view = list;
             const next = JSON.stringify([scope, selected, view.map(entry => [entry.id, entry.title, entry.version, rule(entry.id), entry.client?.failed, updates.get(entry.id)])]);
             const editingField = mounted.list.contains(doc.activeElement) && doc.activeElement?.closest?.('.pz-plugin-fields');
             if (signature !== next && !editingField) {
@@ -1329,7 +1344,7 @@
     // 没有接入的脚本仍可自动收纳入口，但不会被冒充为支持启停或独立配置。
     // 先检查 window.ParaTranzPluginManager；若尚未加载，监听 paratranz-tools:plugins-ready。
     const api = {
-        owner: 'ParaTranz-tools', version: '1.6.0', sync,
+        owner: 'ParaTranz-tools', version: '1.6.1', sync,
         register(descriptor) {
             if (!descriptor || !validId(descriptor.id) || !descriptor.title || /^ParaTranz-tools$/i.test(descriptor.title)) throw new Error('插件信息不完整');
             if (clients.get(descriptor.id)?.version !== descriptor.version) updates.delete(descriptor.id);
