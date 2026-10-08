@@ -19,3 +19,10 @@ ParaTranz-tools 是一个给 ParaTranz 词条编辑页面用的小脚本，补�
 ## 安装
 
 先装好 Tampermonkey（油猴），再 [点击这里安装脚本](https://raw.githubusercontent.com/AshoreFall/ParaTranz-tools/main/dist/paratranz-review-shortcuts.user.js)。安装后刷新 ParaTranz 页面就能用了。
+
+## 之后的计划？
+
+- 黑奴苦力督促
+   - 查看当日工作/挂机时长
+   - 翻译，编辑，审核条数（全项目和单项目）
+   - 抽鞭子系统？？？
