@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.6.1
+// @version      1.6.2
 // @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，代码术语和格式标签的悬浮说明，以及插件管理页。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
@@ -927,13 +927,13 @@
     const doc = page.document;
     const KEY = 'paratranz-tools.plugins.v1';
     const nativeLabel = /^(建议|Suggestions?|历史|History|术语\s*\d*|Terms?\s*\d*|注释\s*\d*|Notes?\s*\d*)$/i;
-    const clients = new Map(), updates = new Map();
+    const clients = new Map(), updates = new Map(), expanded = new Set();
     let store;
     try { store = JSON.parse(page.localStorage.getItem(KEY)); } catch { /* 首次使用 */ }
     if (!store || typeof store !== 'object' || Array.isArray(store)) store = {};
     let mounted = null, queued = false, activating = false, signature = '', selected = null, opened = false;
     let scope = 'project', currentContext = '', observer = null;
-    const sourceItems = new Set(), masked = new Set(), nativeActive = new Set();
+    const sourceItems = new Set(), masked = new Set(), nativeActive = new Set(), styledPanels = new Set(), styledSettings = new Set();
     const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
     const validId = id => typeof id === 'string' && id.length > 0 && id.length < 200 &&
         !['__proto__', 'prototype', 'constructor', 'ParaTranz-tools'].includes(id);
@@ -980,6 +980,7 @@
             const metadata = sorcery ? page.SorceryParaTranzReviewBundle : null;
             return [{ id: tab.getAttribute('data-plugin-id') || tab.id || `tab:${title}`, title, item, tab,
                 panel: panel && mounted.sidebar.contains(panel) ? panel : null,
+                controller: sorcery || null,
                 version: tab.getAttribute('data-plugin-version') || metadata?.VERSION || '',
                 updateURL: tab.getAttribute('data-plugin-update-url') || '',
                 homepage: metadata?.UPDATE_URL || '' }];
@@ -1059,6 +1060,16 @@
         element.addEventListener('click', action);
         return element;
     }
+    function iconButton(kind, label, action, className) {
+        const element = button('', action);element.className = className;
+        element.setAttribute('aria-label', label);element.title = label;
+        const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');svg.setAttribute('aria-hidden', 'true');svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');svg.setAttribute('stroke-width', '1.8');svg.setAttribute('stroke-linecap', 'round');svg.setAttribute('stroke-linejoin', 'round');
+        const path = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', kind === 'back' ? 'M19 12H5m6-6-6 6 6 6' : 'm6 9 6 6 6-6');svg.append(path);element.append(svg);
+        return element;
+    }
     function toggle(text, checked, action, available = true) {
         const label = node('label'), input = node('input'); input.type = 'checkbox';
         input.checked = checked; input.disabled = !available;
@@ -1105,11 +1116,17 @@
     }
     function close() {
         opened = false; selected = null; unmask();restoreActive();
-        if (mounted) { mounted.root.hidden = true; mounted.tab.classList.remove('active');mounted.tab.setAttribute('aria-selected', 'false'); }
+        if (mounted) { mounted.root.hidden = true;mounted.viewBar.hidden = true; mounted.tab.classList.remove('active');mounted.tab.setAttribute('aria-selected', 'false'); }
     }
     function show() {
+        const active = selected && entries().find(entry => entry.id === selected);
+        // 使用校对脚本已有的隐藏接口，保留它的设置和草稿；不销毁插件。
+        active?.controller?.hide?.();
         opened = true; selected = null; signature = '';
-        if (mounted) { mounted.root.hidden = false; mounted.tab.classList.add('active'); }
+        if (mounted) {
+            mounted.root.hidden = false;mounted.root.style.removeProperty('display');
+            mounted.viewBar.hidden = true;mounted.tab.classList.add('active');
+        }
         sync();
     }
     async function openEntry(entry, configure = false) {
@@ -1119,7 +1136,9 @@
             status('这个插件已停用，请先启用。');return;
         }
         opened = true; selected = entry.id; unmask();
-        if (mounted) mounted.root.hidden = true;
+        if (mounted) {
+            mounted.root.hidden = true;mounted.viewBar.hidden = false;mounted.viewBar.style.removeProperty('display');mounted.viewTitle.textContent = entry.title;
+        }
         try {
             activating = true;
             if (typeof entry.open === 'function') await entry.open({ ...context() });
@@ -1201,22 +1220,33 @@
         const global = userStore().global[entry.id] || {};
         const state = scope === 'global' ? { ...current, enabled: global.enabled !== false, collect: global.collect !== false } : current;
         const head = node('div', null, 'pz-plugin-card-head');
-        head.append(node('strong', entry.title), node('span', entry.version ? `v${entry.version}` : '版本未提供', 'text-muted'));
-        card.append(head);
+        const identity = node('div', null, 'pz-plugin-identity');identity.append(node('strong', entry.title));
+        if (entry.version) identity.append(node('span', `v${entry.version}`, 'text-muted'));
         const actions = node('div', null, 'pz-plugin-actions');
-        actions.append(button('打开', () => openEntry(entry)), button('配置', () => openEntry(entry, true)));
+        const open = button('打开', () => openEntry(entry));open.className = 'pz-plugin-open';
+        const disclosure = iconButton('down', `${expanded.has(entry.id) ? '收起' : '展开'} ${entry.title} 配置`, () => {
+            if (expanded.has(entry.id)) expanded.delete(entry.id);else expanded.add(entry.id);
+            signature = '';sync();
+        }, 'pz-plugin-disclosure');
+        disclosure.setAttribute('aria-expanded', String(expanded.has(entry.id)));
+        actions.append(open, disclosure);head.append(identity, actions);
+        card.append(head);
+        const details = node('div', null, 'pz-plugin-details');details.hidden = !expanded.has(entry.id);
+        details.id = `pz-plugin-config-${encodeURIComponent(entry.id)}`;disclosure.setAttribute('aria-controls', details.id);
+        const extraActions = node('div', null, 'pz-plugin-extra-actions');
+        extraActions.append(button('插件设置', () => openEntry(entry, true)));
         if (safeURL(entry.updateURL) && entry.version) {
             const update = button('检查更新', () => checkUpdate(entry));
             update.disabled = !!updates.get(entry.id)?.pending;
-            actions.append(update);
+            extraActions.append(update);
         }
         const updateState = updates.get(entry.id);
         if (updateState?.available && updateState.download) {
-            const link = node('a', '更新', 'btn btn-sm btn-primary');link.href = updateState.download;link.target = '_blank';link.rel = 'noopener noreferrer';actions.append(link);
+            const link = node('a', '更新', 'btn btn-sm btn-primary');link.href = updateState.download;link.target = '_blank';link.rel = 'noopener noreferrer';extraActions.append(link);
         } else if (safeURL(entry.homepage) && !entry.updateURL) {
-            const link = node('a', '查看作者更新入口', 'btn btn-sm btn-outline-secondary');link.href = safeURL(entry.homepage);link.target = '_blank';link.rel = 'noopener noreferrer';actions.append(link);
+            const link = node('a', '作者更新', 'btn btn-sm btn-outline-secondary');link.href = safeURL(entry.homepage);link.target = '_blank';link.rel = 'noopener noreferrer';extraActions.append(link);
         }
-        card.append(actions);
+        details.append(extraActions);
         if (updateState?.message) card.append(node('p', updateState.message, 'pz-plugin-update'));
         const rules = node('div', null, 'pz-plugin-rules');
         rules.append(toggle('收进插件页', state.collect, value => change(entry, { collect: value })));
@@ -1227,7 +1257,7 @@
         const canConfigure = typeof entry.applyConfig === 'function' && schema.length > 0;
         if (scope === 'project' && canConfigure) rules.append(toggle('本项目独立设置', state.independent, value =>
             change(entry, { independent: value, config: value ? clone(effective(entry).config) : state.config }), canConfigure));
-        card.append(rules);
+        details.append(rules);
         if (entry.client?.failed) card.append(node('p', '设置应用失败，未确认运行状态。', 'pz-plugin-note'));
         if (canConfigure && (scope === 'global' || state.independent)) {
             const values = scope === 'global' ? Object.fromEntries(schema.map(field =>
@@ -1251,14 +1281,17 @@
                 });
                 label.append(input);form.append(label);
             }
-            card.append(form);
+            details.append(form);
         }
+        card.append(details);
         return card;
     }
     function restoreSources() { for (const item of sourceItems) item.removeAttribute('data-pz-plugin-collected');sourceItems.clear(); }
     function teardown() {
         restoreSources();unmask();restoreActive();
-        if (mounted) { mounted.nav.removeEventListener('click', mounted.navClick, true);mounted.item.remove();mounted.root.remove(); }
+        for (const panel of styledPanels) panel.removeAttribute('data-pz-plugin-panel');styledPanels.clear();
+        for (const control of styledSettings) control.classList.remove('pz-plugin-settings-toggle');styledSettings.clear();
+        if (mounted) { mounted.nav.removeEventListener('click', mounted.navClick, true);mounted.item.remove();mounted.root.remove();mounted.viewBar.remove(); }
         mounted = null;signature = '';selected = null;opened = false;
     }
     function mount(sidebar, nav) {
@@ -1273,23 +1306,42 @@
         const checkAll = button('检查更新', () => { for (const entry of entries()) checkUpdate(entry); });
         toolbar.append(selector, checkAll);
         const message = node('p', '', 'pz-plugin-status'), list = node('div', null, 'pz-plugin-list');root.append(toolbar, message, list);
+        const viewBar = node('div', null, 'pz-plugin-view-bar');viewBar.setAttribute('data-pz-plugin-manager', '');viewBar.hidden = true;
+        const back = iconButton('back', '返回插件列表', event => { event.preventDefault();event.stopPropagation();show(); }, 'pz-plugin-back');
+        const viewTitle = node('span', '', 'pz-plugin-view-title');viewBar.append(back, node('span', '插件', 'text-muted'), node('span', '/', 'text-muted'), viewTitle);
         const navClick = event => {
             const link = event.target?.closest?.('.nav-link,[role="tab"]');
             if (opened && !activating && link && link !== tab && nav.contains(link)) close();
         };
-        nav.addEventListener('click', navClick, true);nav.append(item);nav.after(root);
-        mounted = { sidebar, nav, item, tab, root, list, status: message, navClick, selector, checkAll };
+        nav.addEventListener('click', navClick, true);nav.append(item);nav.after(viewBar, root);
+        mounted = { sidebar, nav, item, tab, root, list, status: message, navClick, selector, checkAll, viewBar, viewTitle };
         if (!doc.getElementById('pz-plugin-manager-style')) {
             const style = node('style');style.id = 'pz-plugin-manager-style';style.textContent =
-                '[data-pz-plugin-collected],[data-pz-plugin-masked]{display:none!important}.pz-plugin-manager[hidden]{display:none!important}' +
+                '[data-pz-plugin-collected],[data-pz-plugin-masked]{display:none!important}' +
+                '.pz-plugin-manager[hidden],.pz-plugin-view-bar[hidden],.pz-plugin-details[hidden]{display:none!important}' +
+                '.pz-plugin-manager:not([hidden]){display:block!important}.pz-plugin-view-bar:not([hidden]){display:flex!important}' +
                 '[data-pz-plugin-manager]>.nav-link{width:100%;border:0;cursor:pointer;color:#007bff;background:transparent}' +
                 '[data-pz-plugin-manager]>.nav-link.active{color:#fff;background:#007bff}' +
                 '.pz-plugin-toolbar [hidden]{display:none!important}' +
-                '.pz-plugin-manager{margin-top:12px;color:inherit}.pz-plugin-toolbar,.pz-plugin-actions,.pz-plugin-rules{display:flex;align-items:center;flex-wrap:wrap;gap:8px}' +
-                '.pz-plugin-toolbar{margin-bottom:12px}.pz-plugin-toolbar select{padding:5px;border:1px solid #adb5bd;border-radius:6px;background:transparent;color:inherit}' +
-                '.pz-plugin-card{padding:14px;margin:0 0 12px;border:1px solid #adb5bd66;border-radius:8px}.pz-plugin-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}' +
-                '.pz-plugin-rules{gap:14px}.pz-plugin-rules label{margin:0}.pz-plugin-note,.pz-plugin-update,.pz-plugin-status{font-size:.875em;margin:8px 0}.pz-plugin-fields{display:grid;gap:8px;margin-top:12px}' +
-                '.pz-plugin-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px}.pz-plugin-fields input:not([type=checkbox]),.pz-plugin-fields select{max-width:55%;border:1px solid #adb5bd;border-radius:4px;padding:4px;background:transparent;color:inherit}';
+                '.pz-plugin-manager{margin-top:10px;color:inherit;font-size:.875rem}.pz-plugin-toolbar,.pz-plugin-actions,.pz-plugin-rules,.pz-plugin-extra-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}' +
+                '.pz-plugin-toolbar{margin-bottom:8px;justify-content:space-between}.pz-plugin-toolbar select{max-width:100%;padding:5px 8px;border:1px solid #adb5bd66;border-radius:6px;background:transparent;color:inherit;font:inherit}' +
+                '.pz-plugin-card{padding:12px 14px;margin:0;border-bottom:1px solid #adb5bd40}.pz-plugin-card:last-child{border-bottom:0}.pz-plugin-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px}' +
+                '.pz-plugin-identity{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;min-width:0}.pz-plugin-identity strong{font-size:1rem;font-weight:600;overflow-wrap:anywhere}.pz-plugin-identity span{font-size:.75rem}' +
+                '.pz-plugin-actions{flex-wrap:nowrap;flex-shrink:0;gap:6px}.pz-plugin-open{border:1px solid #007bff;border-radius:6px;padding:4px 12px;color:#007bff;background:transparent;font:inherit;line-height:1.5;cursor:pointer}' +
+                '.pz-plugin-open:hover{color:#fff;background:#007bff}.pz-plugin-disclosure,.pz-plugin-back{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:5px;border:0;border-radius:6px;background:transparent;color:#6c757d;cursor:pointer}' +
+                '.pz-plugin-disclosure:hover,.pz-plugin-back:hover{background:#007bff10;color:#007bff}.pz-plugin-disclosure svg,.pz-plugin-back svg{width:20px;height:20px;flex-shrink:0}.pz-plugin-disclosure[aria-expanded=true] svg{transform:rotate(180deg)}' +
+                '.pz-plugin-details{margin-top:12px;padding-top:12px;border-top:1px solid #adb5bd30}.pz-plugin-extra-actions{margin-bottom:12px}.pz-plugin-extra-actions .btn{font-size:.8125rem;padding:3px 8px;border:0}.pz-plugin-extra-actions a{font-size:.8125rem}' +
+                '.pz-plugin-rules{align-items:flex-start;gap:8px 18px}.pz-plugin-rules label{margin:0;display:inline-flex;align-items:center;gap:5px}.pz-plugin-note,.pz-plugin-update,.pz-plugin-status{font-size:.8125rem;margin:6px 0}.pz-plugin-status:empty{display:none}.pz-plugin-fields{display:grid;gap:8px;margin-top:12px}' +
+                '.pz-plugin-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0}.pz-plugin-fields input:not([type=checkbox]),.pz-plugin-fields select{max-width:55%;border:1px solid #adb5bd66;border-radius:5px;padding:4px 6px;background:transparent;color:inherit;font:inherit}' +
+                '.pz-plugin-view-bar{align-items:center;gap:8px;margin:8px 0;padding:5px 0;font-size:.8125rem;flex-shrink:0}.pz-plugin-view-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+                '[data-pz-plugin-panel] .pz-plugin-settings-toggle{display:inline-flex!important;align-items:center;justify-content:center;width:28px!important;height:28px!important;font-size:0!important;border:0!important}' +
+                '[data-pz-plugin-panel] .pz-plugin-settings-toggle>*{display:none!important}[data-pz-plugin-panel] .pz-plugin-settings-toggle:after{content:"";width:8px;height:8px;border-right:1.8px solid currentColor;border-bottom:1.8px solid currentColor;transform:rotate(45deg);margin-top:-4px}' +
+                '[data-pz-plugin-panel] .pz-plugin-settings-toggle[aria-expanded=true]:after{transform:rotate(225deg);margin-top:4px}' +
+                '[data-pz-plugin-panel] .pt-settings-groups{align-items:start!important;gap:10px!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr))!important}' +
+                '[data-pz-plugin-panel] .pt-settings-controls{display:grid!important;grid-template-columns:1fr!important;gap:8px!important}[data-pz-plugin-panel] .pt-settings label{display:flex!important;width:100%;gap:8px!important;font-size:.8125rem!important}' +
+                '[data-pz-plugin-panel] .pt-settings label input:not([type=checkbox]),[data-pz-plugin-panel] .pt-settings label select{margin-left:auto!important}[data-pz-plugin-panel] .pt-settings input[type=number]{width:70px!important}' +
+                '[data-pz-plugin-panel] .pt-settings-group{padding:10px!important;border-radius:6px!important}[data-pz-plugin-panel] .pt-settings-title{font-size:.8125rem!important}[data-pz-plugin-panel] .pt-settings-group-footer{margin-top:8px!important}' +
+                '[data-pz-plugin-panel] .pt-settings{max-height:min(46dvh,420px)!important}[data-pz-plugin-panel] .pt-settings-actions{margin-top:10px!important;font-size:.8125rem!important}';
             doc.head?.append(style);
         }
     }
@@ -1299,14 +1351,25 @@
         const sidebar = ctx.projectId && doc.querySelector('.sidebar-right');
         const nav = sidebar && [...(sidebar.children || [])].find(element => element.classList.contains('nav') &&
             [...element.querySelectorAll('.nav-link')].some(link => nativeLabel.test(link.textContent.trim())));
-        if (mounted && (!mounted.item.isConnected || !mounted.root.isConnected || mounted.nav !== nav)) teardown();
+        let previousView = null;
+        if (mounted && (!mounted.item.isConnected || !mounted.root.isConnected || !mounted.viewBar.isConnected || mounted.nav !== nav)) {
+            previousView = { opened, selected };teardown();
+        }
         if (!nav) return;
         if (!mounted) mount(sidebar, nav);
+        if (previousView) { opened = previousView.opened;selected = previousView.selected; }
         if (mounted.selector.value !== scope) mounted.selector.value = scope;
         const projectOption = mounted.selector.children[0];
         if (projectOption.textContent !== `项目 ${ctx.projectId}`) projectOption.textContent = `项目 ${ctx.projectId}`;
         const list = entries(), nextSources = new Set();
         for (const entry of list) {
+            // 旧校对脚本会再延迟调用一次 show；返回列表时不能让这次回调把面板重新打开。
+            if (opened && !selected && entry.controller?.isVisible?.()) entry.controller.hide?.();
+            if (entry.panel?.isConnected) {
+                if (!styledPanels.has(entry.panel)) { entry.panel.setAttribute('data-pz-plugin-panel', '');styledPanels.add(entry.panel); }
+                const settings = entry.panel.querySelector('.pt-head [data-action="settings"]');
+                if (settings && !styledSettings.has(settings)) { settings.classList.add('pz-plugin-settings-toggle');styledSettings.add(settings); }
+            }
             const previousUpdate = updates.get(entry.id);
             if (previousUpdate && previousUpdate.metadataKey !== JSON.stringify([entry.version, safeURL(entry.updateURL), entry.metadataName])) updates.delete(entry.id);
             if (entry.item && rule(entry.id).collect) nextSources.add(entry.item);
@@ -1320,8 +1383,15 @@
         for (const item of nextSources) if (!sourceItems.has(item)) item.setAttribute('data-pz-plugin-collected', '');
         sourceItems.clear();for (const item of nextSources) sourceItems.add(item);
         mounted.root.hidden = !opened || !!selected;
+        mounted.viewBar.hidden = !opened || !selected;
+        if (!mounted.root.hidden) mounted.root.style.removeProperty('display');
+        if (!mounted.viewBar.hidden) mounted.viewBar.style.removeProperty('display');
         if (opened) {
-            if (selected && !list.some(entry => entry.id === selected)) { selected = null;signature = '';mounted.root.hidden = false; }
+            if (selected && !list.some(entry => entry.id === selected)) { selected = null;signature = '';mounted.root.hidden = false;mounted.viewBar.hidden = true; }
+            if (selected) {
+                const title = list.find(entry => entry.id === selected)?.title || '';
+                if (mounted.viewTitle.textContent !== title) mounted.viewTitle.textContent = title;
+            }
             mounted.checkAll.hidden = !list.some(entry => safeURL(entry.updateURL) && entry.version);
             mounted.tab.classList.add('active');
             if (mounted.tab.getAttribute('aria-selected') !== 'true') mounted.tab.setAttribute('aria-selected', 'true');
@@ -1332,7 +1402,7 @@
             // 打开插件后只显示原插件面板；再次点“插件”页签即返回列表。
             if (selected) return;
             const view = list;
-            const next = JSON.stringify([scope, selected, view.map(entry => [entry.id, entry.title, entry.version, rule(entry.id), entry.client?.failed, updates.get(entry.id)])]);
+            const next = JSON.stringify([scope, selected, view.map(entry => [entry.id, entry.title, entry.version, expanded.has(entry.id), rule(entry.id), entry.client?.failed, updates.get(entry.id)])]);
             const editingField = mounted.list.contains(doc.activeElement) && doc.activeElement?.closest?.('.pz-plugin-fields');
             if (signature !== next && !editingField) {
                 signature = next;mounted.list.replaceChildren(...view.map(renderCard));
@@ -1344,7 +1414,7 @@
     // 没有接入的脚本仍可自动收纳入口，但不会被冒充为支持启停或独立配置。
     // 先检查 window.ParaTranzPluginManager；若尚未加载，监听 paratranz-tools:plugins-ready。
     const api = {
-        owner: 'ParaTranz-tools', version: '1.6.1', sync,
+        owner: 'ParaTranz-tools', version: '1.6.2', sync,
         register(descriptor) {
             if (!descriptor || !validId(descriptor.id) || !descriptor.title || /^ParaTranz-tools$/i.test(descriptor.title)) throw new Error('插件信息不完整');
             if (clients.get(descriptor.id)?.version !== descriptor.version) updates.delete(descriptor.id);
