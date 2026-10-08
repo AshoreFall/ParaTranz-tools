@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.8.1
-// @description  检查与审核、空译文保存、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
+// @version      1.8.3
+// @description  检查与审核、空译文保存、空白格式检查、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
 // @match        https://paratranz.cn/projects/*/strings*
 // @match        https://paratranz.cn/projects/*/issues*
+// @match        https://paratranz.cn/projects/*/settings*
 // @grant        unsafeWindow
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/AshoreFall/ParaTranz-tools/main/dist/paratranz-review-shortcuts.meta.js
@@ -14,7 +15,7 @@
 (() => {
     'use strict';
 
-    // 功能：检查/审核、空译文保存、保存菜单、注释 @ 补全、代码悬浮说明、分页修复与页码记忆。插件管理与疑问分组在文件末尾。
+    // 功能：检查/审核、空译文保存、保存菜单、注释 @ 补全、代码悬浮说明、分页修复与页码记忆。插件管理、疑问分组和空白检查在文件末尾。
     // 修改功能时，找到下面对应的中文注释即可。
     // ===== 运行状态 =====
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -311,6 +312,8 @@
         catch (error) { console.warn('ParaTranz-tools：插件页刷新失败', error?.message); }
         try { page.ParaTranzDisputeGroups?.sync?.(); }
         catch (error) { console.warn('ParaTranz-tools：疑问分组刷新失败', error?.message); }
+        try { page.ParaTranzWhitespaceCheck?.sync?.(); }
+        catch (error) { console.warn('ParaTranz-tools：空白检查刷新失败', error?.message); }
         syncPaging();
         rememberPagingURL();
         syncEmptySaving();
@@ -1454,27 +1457,33 @@
     const validId = value => typeof value === 'string' && /^[\w-]{1,100}$/.test(value);
     const validName = value => typeof value === 'string' && value.trim() === value && value.length > 0 && value.length <= 50;
     const unwrap = value => value?.data && !value.results && !value.id ? value.data : value;
-    function session(ctx) { if (!sessions.has(key(ctx))) sessions.set(key(ctx), { known: false, roots: [], value: null, pending: null, tail: Promise.resolve() });return sessions.get(key(ctx)); }
+    function session(ctx) { if (!sessions.has(key(ctx))) sessions.set(key(ctx), { known: false, roots: [], managers: new Set(), value: null, pending: null, tail: Promise.resolve() });return sessions.get(key(ctx)); }
     function encode(operation) { return `${MARK}\n\n\`\`\`json\n${JSON.stringify(operation)}\n\`\`\``; }
     function decode(content) {
         if (typeof content !== 'string' || content.length > 1000000 || !content.startsWith(MARK + '\n')) return null;
         const match = /^\[ParaTranz-tools:dispute-groups:v1\]\s+```json\s*([\s\S]*?)\s*```\s*$/.exec(content);
         if (!match) return null;try { const value = JSON.parse(match[1]);return value?.v === 1 && validId(value.opId) ? value : null; } catch { return null; }
     }
-    function reduce(roots) {
+    function reduce(roots, managers = new Set()) {
         const value = { groups: [], assignments: Object.create(null) }, seen = new Set(), aliases = new Map();
         const resolve = id => { for (let n = 0; aliases.has(id) && n < 100; n++) id = aliases.get(id);return id; };
-        const add = group => {
+        const add = (group, author) => {
             if (!validId(group?.id) || !validName(group.name)) return;
             const old = value.groups.find(item => item.id === resolve(group.id) || item.name === group.name);
-            if (old) { if (old.id !== group.id) aliases.set(group.id, old.id);return; }value.groups.push({ id: group.id, name: group.name });
+            if (old) { if (old.id !== group.id) aliases.set(group.id, old.id);return; }value.groups.push({ id: group.id, name: group.name, createdBy: author });
         };
-        const apply = operation => {
-            if (!operation || seen.has(operation.opId)) return;seen.add(operation.opId);
+        const apply = (operation, author) => {
+            if (!operation || !positive(author) || seen.has(operation.opId)) return;
+            author = String(author);
+            if (['rename', 'delete'].includes(operation.kind)) {
+                const group = value.groups.find(item => item.id === resolve(operation.groupId));
+                if (!group || group.createdBy !== author && !managers.has(author)) return;
+            }
+            seen.add(operation.opId);
             if (operation.kind === 'init') {
-                for (const group of (Array.isArray(operation.groups) ? operation.groups : [])) add(group);
+                for (const group of (Array.isArray(operation.groups) ? operation.groups : [])) add(group, author);
                 for (const [id, group] of Object.entries(operation.assignments || {})) if (positive(id) && value.groups.some(item => item.id === resolve(group))) value.assignments[id] = resolve(group);
-            } else if (operation.kind === 'create') add(operation.group);
+            } else if (operation.kind === 'create') add(operation.group, author);
             else if (operation.kind === 'rename' && validName(operation.name)) {
                 const group = value.groups.find(item => item.id === resolve(operation.groupId));if (!group) return;
                 const duplicate = value.groups.find(item => item.id !== group.id && item.name === operation.name);
@@ -1493,13 +1502,23 @@
         };
         const activities = [];
         for (const root of roots.slice().sort((a, b) => Number(a.id) - Number(b.id))) {
-            apply(decode(root.content));
+            apply(decode(root.content), root.lastEdit || root.uid);
             for (const activity of root.activities || []) {
-                const operation = decode(activity.content);if (operation) activities.push({ operation, id: Number(activity.id) || 0, time: Date.parse(activity.createdAt) || 0 });
+                const operation = decode(activity.content);if (operation) activities.push({ operation, author: activity.lastEdit || activity.uid, id: Number(activity.id) || 0, time: Date.parse(activity.createdAt) || 0 });
             }
         }
         activities.sort((a, b) => a.time - b.time || a.id - b.id || a.operation.opId.localeCompare(b.operation.opId));
-        for (const activity of activities) apply(activity.operation);return { value, seen };
+        for (const activity of activities) apply(activity.operation, activity.author);return { value, seen };
+    }
+    async function readManagers(ctx) {
+        const [project, members] = await Promise.all([
+            ctx.vm.$req.get(`/projects/${ctx.projectId}`, { silent: true }).then(unwrap),
+            ctx.vm.$req.get(`/projects/${ctx.projectId}/members`, { silent: true }).then(unwrap)
+        ]);
+        if (Number(project?.id) !== Number(ctx.projectId) || !positive(project.uid) || !Array.isArray(members)) throw new Error('无法确认项目管理权限，请刷新重试');
+        const managers = new Set([String(project.uid)]);
+        for (const member of members) if (positive(member.uid) && Number(member.project) === Number(ctx.projectId) && [3, 10].includes(Number(member.permission))) managers.add(String(member.uid));
+        return managers;
     }
     async function discover(ctx, refresh = false) {
         const current = session(ctx);
@@ -1530,11 +1549,12 @@
                 if (Number(issue?.id) !== Number(candidate.id)) throw new Error('项目分组读取失败：讨论 ID 不符');
                 if (decode(issue.content)?.kind === 'init') { if (!Array.isArray(issue.activities)) throw new Error('项目分组读取失败：缺少变更记录');roots.push(issue); }
             }
-            current.roots = roots;current.value = roots.length ? reduce(roots).value : null;current.known = true;return current.value;
+            const managers = roots.length ? await readManagers(ctx) : new Set();
+            current.roots = roots;current.managers = managers;current.value = roots.length ? reduce(roots, managers).value : null;current.known = true;return current.value;
         })().finally(() => { current.pending = null; });
         return current.pending;
     }
-    function validate(operation, value) {
+    function validate(operation, value, ctx) {
         if (operation.kind === 'create') {
             if (!validId(operation.group?.id) || !validName(operation.group.name)) throw new Error('分组名不正确');
             if (value.groups.some(group => group.name === operation.group.name)) throw new Error('已经有同名分组');
@@ -1542,7 +1562,8 @@
             if (!positive(operation.stringId)) throw new Error('词条尚未加载');
             if (operation.groupId && !value.groups.some(group => group.id === operation.groupId)) throw new Error('这个分组已不存在');
         } else if (operation.kind === 'rename' || operation.kind === 'delete') {
-            if (!value.groups.some(group => group.id === operation.groupId)) throw new Error('这个分组已不存在');
+            const group = value.groups.find(group => group.id === operation.groupId);if (!group) throw new Error('这个分组已不存在');
+            if (group.createdBy !== String(ctx.userId) && !session(ctx).managers.has(String(ctx.userId))) throw new Error('只能修改或删除自己创建的分组');
             if (operation.kind === 'rename' && (!validName(operation.name) || value.groups.some(group => group.id !== operation.groupId && group.name === operation.name))) throw new Error('分组名为空、过长或已经存在');
         } else throw new Error('分组操作不正确');
     }
@@ -1554,18 +1575,18 @@
         const operation = { ...fields, v: 1, opId: token() };
         return serialized(ctx, async () => {
             const value = await discover(ctx, true), current = session(ctx);
-            if (!value) throw new Error('项目共享分组已不存在，请刷新后重试');validate(operation, value);
+            if (!value) throw new Error('项目共享分组已不存在，请刷新后重试');validate(operation, value, ctx);
             const root = current.roots.slice().sort((a, b) => Number(a.id) - Number(b.id))[0];
             let reply;
             try {
                 reply = unwrap(await ctx.vm.$req.post(`/projects/${ctx.projectId}/issues/${root.id}`, { op: 'reply', content: encode(operation) }));
-                if (!positive(reply?.id) || decode(reply.content)?.opId !== operation.opId) throw new Error('分组保存响应不完整');
+                if (!positive(reply?.id) || String(reply.uid) !== String(ctx.userId) || decode(reply.content)?.opId !== operation.opId) throw new Error('分组保存响应不完整');
             } catch (error) {
                 // 响应丢失时只读回核实，不重复提交同一操作。
-                try { await discover(ctx, true);if (reduce(current.roots).seen.has(operation.opId)) return current.value; } catch { /* 原始失败信息仍有效 */ }
+                try { await discover(ctx, true);if (reduce(current.roots, current.managers).seen.has(operation.opId)) return current.value; } catch { /* 原始失败信息仍有效 */ }
                 throw new Error(`共享分组未能保存：${error.message}`);
             }
-            root.activities.push(reply);current.value = reduce(current.roots).value;return current.value;
+            root.activities.push(reply);current.value = reduce(current.roots, current.managers).value;return current.value;
         });
     }
     function enable(ctx, local) {
@@ -1574,14 +1595,15 @@
             const init = { v: 1, opId: token(), kind: 'init', groups: local.groups, assignments: local.assignments };
             const content = encode(init);
             const issue = unwrap(await ctx.vm.$req.post(`/projects/${ctx.projectId}/issues`, { title: TITLE, content }));
-            if (!positive(issue?.id) || decode(issue.content)?.opId !== init.opId) throw new Error('共享分组创建响应不完整，请刷新检查项目讨论后再试');
-            const current = session(ctx);current.roots = [{ ...issue, activities: Array.isArray(issue.activities) ? issue.activities : [] }];current.value = reduce(current.roots).value;current.known = true;
+            if (!positive(issue?.id) || String(issue.uid) !== String(ctx.userId) || decode(issue.content)?.opId !== init.opId) throw new Error('共享分组创建响应不完整，请刷新检查项目讨论后再试');
+            const current = session(ctx);current.roots = [{ ...issue, activities: Array.isArray(issue.activities) ? issue.activities : [] }];current.value = reduce(current.roots, current.managers).value;current.known = true;
             // 同时启用产生的多个存储讨论会在刷新时合并，统一向 ID 最小的一条追加。
             return current.value;
         });
     }
     page.ParaTranzDisputeGroupSharing = {
-        version: '1.8.0', discover, enable, write,
+        version: '1.8.2', discover, enable, write,
+        canManage(ctx, groupId) { const current = session(ctx), group = current.value?.groups.find(group => group.id === groupId);return !!group && (group.createdBy === String(ctx.userId) || current.managers.has(String(ctx.userId))); },
         known(ctx) { return session(ctx).known; },
         value(ctx) { return session(ctx).value; },
         issueId(ctx) { const roots = session(ctx).roots;return roots.length ? Math.min(...roots.map(root => Number(root.id))) : 0; }
@@ -1606,8 +1628,8 @@
         return null;
     }
     function context() {
-        const route = /^\/projects\/(\d+)\/(strings|issues)\/?$/.exec(page.location.pathname);
-        const vm = findVM('.string-editor', vm => vm.$uid && vm.$req) || findVM('.issues,.strings', vm => vm.$uid && vm.$req);
+        const route = /^\/projects\/(\d+)\/(strings|issues|settings)(?:\/.*)?$/.exec(page.location.pathname);
+        const vm = findVM('.string-editor', vm => vm.$uid && vm.$req) || findVM('.issues,.strings,.settings', vm => vm.$uid && vm.$req);
         return { projectId: route?.[1] || '', route: route?.[2] || '', userId: positive(vm?.$uid) ? String(vm.$uid) : '', vm };
     }
     function editor() { return findVM('.string-editor', vm => vm.$options?.name === 'stringEditor' && vm.item && typeof vm.markAs === 'function'); }
@@ -1619,9 +1641,15 @@
         if (!ctx.projectId || !ctx.userId) return { groups: [], assignments: {} };
         const user = own(data, ctx.userId) ? data[ctx.userId] : (data[ctx.userId] = {});
         if (!own(user, ctx.projectId) || !Array.isArray(user[ctx.projectId]?.groups) || !user[ctx.projectId]?.assignments) user[ctx.projectId] = { groups: [], assignments: {} };
+        for (const group of user[ctx.projectId].groups) if (!positive(group.createdBy)) group.createdBy = ctx.userId;
         return user[ctx.projectId];
     }
     function state(ctx = context()) { return sharing?.value(ctx) || localState(ctx); }
+    function canManageGroup(groupId, ctx = context()) {
+        if (sharing?.value(ctx)) return sharing.canManage(ctx, groupId);
+        const group = localState(ctx).groups.find(group => group.id === groupId), permission = Number(ctx.vm?.$store?.state?.permissions?.[ctx.projectId]);
+        return !!group && (group.createdBy === ctx.userId || [3, 10].includes(permission));
+    }
     function ready(ctx, action) { return sharing && !sharing.known(ctx) ? sharing.discover(ctx).then(action) : action(); }
     async function refreshShared(ctx = context()) { if (sharing) await sharing.discover(ctx, true);signature = '';queue(); }
     async function sharedWrite(ctx, operation) { await sharing.write(ctx, operation);signature = '';queue(); }
@@ -1645,7 +1673,7 @@
         const id = `g${Date.now().toString(36)}-${(++serial).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         return ready(ctx, () => {
             if (sharing?.value(ctx)) return sharedWrite(ctx, { kind: 'create', group: { id, name } }).then(() => state(ctx).groups.find(group => group.id === id || group.name === name).id);
-            return change(value => { if (value.groups.some(group => group.name === name)) throw new Error('已经有同名分组');value.groups.push({ id, name });return id; }, ctx);
+            return change(value => { if (value.groups.some(group => group.name === name)) throw new Error('已经有同名分组');value.groups.push({ id, name, createdBy: ctx.userId });return id; }, ctx);
         });
     }
     function assign(id, groupId, ctx = context()) {
@@ -1659,11 +1687,13 @@
         name = groupName(name);
         return ready(ctx, () => sharing?.value(ctx) ? sharedWrite(ctx, { kind: 'rename', groupId, name }) : change(value => {
             const group = value.groups.find(group => group.id === groupId);if (!group) throw new Error('这个分组已不存在');
+            if (!canManageGroup(groupId, ctx)) throw new Error('只能修改或删除自己创建的分组');
             if (value.groups.some(group => group.id !== groupId && group.name === name)) throw new Error('已经有同名分组');group.name = name;
         }, ctx));
     }
     function removeGroup(groupId, ctx = context()) {
         return ready(ctx, () => sharing?.value(ctx) ? sharedWrite(ctx, { kind: 'delete', groupId }) : change(value => {
+            if (!canManageGroup(groupId, ctx)) throw new Error('只能修改或删除自己创建的分组');
             value.groups = value.groups.filter(group => group.id !== groupId);
             for (const id of Object.keys(value.assignments)) if (value.assignments[id] === groupId) delete value.assignments[id];
         }, ctx));
@@ -1944,7 +1974,7 @@
             const overlay = node('div', null, 'modal show pz-dg-modal');overlay.setAttribute('role', 'dialog');overlay.setAttribute('aria-modal', 'true');overlay.setAttribute('aria-label', '疑问分组');overlay.style.display = 'block';
             const dialog = node('div', null, 'modal-dialog modal-lg'), content = node('div', null, 'modal-content'), head = node('div', null, 'modal-header'), body = node('div', null, 'modal-body'), footer = node('div', null, 'modal-footer');
             const close = button('×', closeOverview, 'close');close.setAttribute('aria-label', '关闭疑问分组');
-            head.append(node('h5', '疑问分组', 'modal-title'), close);body.append(mounted.status, mounted.panel);footer.append(button('返回', closeOverview, 'btn btn-primary'));
+            head.append(node('h5', '管理疑问分组', 'modal-title'), close);body.append(mounted.status, mounted.panel);footer.append(button('返回', closeOverview, 'btn btn-primary'));
             content.append(head, body, footer);dialog.append(content);overlay.append(dialog);
             overlay.addEventListener('click', event => { if (event.target === overlay) closeOverview(); });
             mounted.overlay = overlay;mounted.backdrop = node('div', null, 'modal-backdrop show pz-dg-backdrop');mounted.previousOverflow = doc.body.style.overflow;mounted.previousFocus = doc.activeElement;mounted.previousModalOpen = doc.body.classList.contains('modal-open');
@@ -1971,33 +2001,37 @@
             const option = node('option', `${group.name}${loaded ? ` (${group.id === 'all' ? rows.length : counts.get(group.id) || 0})` : ''}`);option.value = group.id;picker.append(option);
         }
         picker.value = filter;picker.addEventListener('change', () => { filter = picker.value;listPage = 1;signature = '';render(); });
-        const reload = button('刷新', loadRows);reload.disabled = loading;tools.append(picker, reload);
+        const reload = button('刷新', loadRows, 'pz-dg-button pz-dg-secondary');reload.disabled = loading;tools.append(picker, reload);
         if (mounted.mode) {
             const ctx = context(), shared = sharing?.value(ctx);
             mounted.mode.replaceChildren();
             if (shared) {
                 const link = node('a', `项目 ${ctx.projectId} · 共享分组`);link.href = `/projects/${ctx.projectId}/issues/${sharing.issueId(ctx)}`;mounted.mode.append(link);
             } else {
-                mounted.mode.append(node('span', '个人分组'));
-                if (sharing) mounted.mode.append(button('启用项目共享', async () => {
+                mounted.mode.append(node('span', '个人分组', 'pz-dg-mode-badge'), node('small', '仅保存在当前浏览器', 'pz-dg-muted'));
+                if (sharing) {
+                    const enable = button('启用项目共享', async () => {
                     await sharing.enable(ctx, copy(localState(ctx)));signature = '';queue();
-                }), node('small', '启用后，分组标记保存在项目讨论里，成员装好脚本即可读取。', 'pz-dg-muted'));
+                    }, 'pz-dg-button pz-dg-share');enable.title = '把分组标记保存到项目讨论，装有脚本的成员可共享。';mounted.mode.append(enable);
+                }
             }
         }
-        if (current.groups.some(group => group.id === filter)) {
-            const rename = node('form', null, 'pz-dg-create'), name = node('input');name.value = current.groups.find(group => group.id === filter).name;name.maxLength = 50;name.setAttribute('aria-label', '修改分组名');
-            const save = node('button', '改名', 'pz-dg-button');save.type = 'submit';rename.append(name, save);
-            rename.addEventListener('submit', async event => { event.preventDefault();try { await renameGroup(filter, name.value);name.blur();queue(); } catch (error) { report(error); } });
-            tools.append(rename, button('删除分组', async () => {
+        if (current.groups.some(group => group.id === filter) && canManageGroup(filter)) {
+            const rename = node('form', null, 'pz-dg-create pz-dg-rename'), name = node('input');name.value = current.groups.find(group => group.id === filter).name;name.maxLength = 50;name.setAttribute('aria-label', '修改分组名');rename.hidden = true;
+            const save = node('button', '保存', 'pz-dg-button');save.type = 'submit';rename.append(name, save, button('取消', () => { rename.hidden = true; }));
+            rename.addEventListener('submit', async event => { event.preventDefault();try { await renameGroup(filter, name.value);rename.hidden = true;name.blur();queue(); } catch (error) { report(error); } });
+            tools.append(button('改名', () => { rename.hidden = !rename.hidden;if (!rename.hidden) name.focus(); }), button('删除分组', async () => {
                 if (!page.confirm(`${sharing?.value(context()) ? '这是项目共享分组。' : ''}只删除这个分组，组内词条回到未分组；不会删除词条或修改译文。`)) return;
                 await removeGroup(filter);filter = 'none';listPage = 1;queue();
-            }));
+            }, 'pz-dg-button pz-dg-danger'), rename);
         }
-        const create = newGroupForm(id => { filter = id;listPage = 1;signature = '';render(); });
+        const create = newGroupForm(id => { filter = id;listPage = 1;signature = '';render(); });create.classList.add('pz-dg-new-group');create.querySelector('input').placeholder = '新分组名称';
         const list = node('div', null, 'pz-dg-rows');
         if (loading) list.append(node('p', '正在读取疑问词条…', 'pz-dg-muted'));
         else if (loaded) {
-            if (!selected.length) list.append(node('p', '这个分组暂无疑问词条。', 'pz-dg-muted'));
+            if (!selected.length) {
+                const empty = node('div', null, 'pz-dg-empty');empty.append(node('strong', '暂无疑问词条'), node('small', filter === 'all' ? '标记为有疑问的词条会显示在这里。' : '在词条中选择此分组后，会显示在这里。'));list.append(empty);
+            }
             for (const row of selected.slice((listPage - 1) * PAGE_SIZE, listPage * PAGE_SIZE)) {
                 const item = node('div', null, 'pz-dg-row'), text = node('div', null, 'pz-dg-row-text'), link = node('a', row.original || `词条 ${row.id}`);
                 link.href = `/projects/${context().projectId}/strings?id=${Number(row.id)}`;
@@ -2006,7 +2040,7 @@
             }
         }
         const pagination = node('div', null, 'pz-dg-pagination');
-        if (loaded) {
+        if (loaded && selected.length) {
             const start = selected.length ? (listPage - 1) * PAGE_SIZE + 1 : 0, end = Math.min(listPage * PAGE_SIZE, selected.length);
             pagination.append(node('span', `${start}–${end} 条 · 共 ${selected.length} 条`, 'pz-dg-muted'));
             const controls = node('div', null, 'pz-dg-page-controls'), pageInput = node('input');pageInput.type = 'number';pageInput.min = '1';pageInput.max = String(totalPages);pageInput.value = String(listPage);pageInput.setAttribute('aria-label', '疑问分组页码');
@@ -2020,13 +2054,25 @@
             for (const [label, value, disabled, title] of [['›', listPage + 1, listPage === totalPages, '下一页'], ['»', totalPages, listPage === totalPages, '最后一页']]) {
                 const control = button(label, () => turn(value), 'pz-dg-page-button');control.disabled = disabled;control.title = title;controls.append(control);
             }
-            pagination.append(controls, node('span', '10 条 / 页', 'pz-dg-muted'));
+            if (totalPages > 1) pagination.append(controls);pagination.append(node('span', '10 条 / 页', 'pz-dg-muted'));
         }
         mounted.content.replaceChildren(tools, create, list, pagination);
     }
     function placeLaunch(ctx) {
         if (!mounted) return;
         const { host, launch } = mounted;
+        if (ctx.route === 'settings') {
+            launch.hidden = true;
+            const nav = host.querySelector('aside .nav');if (!nav) return;
+            if (!mounted.settingsItem?.isConnected) {
+                mounted.settingsItem?.remove();
+                const item = node('li', null, 'nav-item pz-dg-settings-entry'), control = button('', openOverview, 'nav-link');
+                const icon = node('i', null, 'fad fa-circle-question fa-fw');icon.setAttribute('aria-hidden', 'true');control.append(icon, node('span', '疑问管理'));item.append(control);
+                const comments = [...nav.querySelectorAll('a')].find(link => /\/settings\/comments\/?$/.test(link.getAttribute('href') || ''))?.closest('.nav-item');
+                if (comments) comments.after(item);else nav.append(item);mounted.settingsItem = item;
+            }
+            return;
+        }
         if (ctx.route === 'issues') {
             const reference = [...host.querySelectorAll('a,button')].find(element => /查看\s*\d*\s*有疑问词条|View.*Disputed/i.test(element.textContent));
             launch.hidden = !!reference;launch.textContent = '疑问分组';
@@ -2059,7 +2105,7 @@
         if (mounted) {
             if (mounted.overlay) closeOverview();
             mounted.reference?.removeEventListener('click', mounted.referenceClick, true);
-            mounted.breadcrumb?.classList.remove('pz-dg-browse-host');mounted.crumb?.classList.remove('pz-dg-crumb');mounted.launch.remove();mounted.routeMenu.remove();mounted.groupLabel.remove();mounted.panel.remove();mounted.status.remove();mounted.slot?.remove();
+            mounted.settingsItem?.remove();mounted.breadcrumb?.classList.remove('pz-dg-browse-host');mounted.crumb?.classList.remove('pz-dg-crumb');mounted.launch.remove();mounted.routeMenu.remove();mounted.groupLabel.remove();mounted.panel.remove();mounted.status.remove();mounted.slot?.remove();
         }
         mounted = null;signature = '';
     }
@@ -2071,7 +2117,7 @@
             if (ctx.projectId && ctx.userId && sharing) sharing.discover(ctx).then(() => { if (key === contextKey) queue(); }).catch(report);
         }
         if (!ctx.projectId || !ctx.userId) return;
-        const host = doc.querySelector(ctx.route === 'issues' ? '.issues' : '.strings');
+        const host = doc.querySelector(ctx.route === 'issues' ? '.issues' : ctx.route === 'settings' ? '.settings' : '.strings');
         if (!host) return;
         if (mounted && (mounted.host !== host || !mounted.launch.isConnected || !mounted.panel.isConnected)) teardown();
         if (!mounted) {
@@ -2093,7 +2139,7 @@
         placeLaunch(ctx);syncEditor(editor());syncNativeList();render();
     }
     const api = {
-        version: '1.8.1', sync, open: openOverview, managesRoute: managed,
+        version: '1.8.2', sync, open: openOverview, managesRoute: managed,
         groups() { return copy(state().groups); }, createGroup,
         assignment(id) { return state().assignments[String(id)] || ''; }, assign,
         destroy() { destroyed = true;request++;for (const binding of [...bindings.values()]) unbind(binding);for (const binding of [...nativeLists.values()]) disposeList(binding);teardown();doc.removeEventListener('click', dismiss);doc.removeEventListener('keydown', dismiss);page.removeEventListener?.('storage', storageChanged);if (page.ParaTranzDisputeGroups === api) delete page.ParaTranzDisputeGroups; }
@@ -2121,7 +2167,7 @@
     function start() {
         if (!doc.getElementById('pz-dispute-group-style')) {
             const style = node('style');style.id = 'pz-dispute-group-style';style.textContent =
-                '.pz-dg-panel[hidden],.pz-dg-launch[hidden],.pz-dg-choices[hidden],.pz-dg-create[hidden],.pz-dg-route-menu[hidden]{display:none!important}.pz-dg-launch{margin:0 0 0 10px;padding:3px 8px;border:1px solid #007bff;border-radius:5px;background:transparent;color:#007bff;font-size:.875em;cursor:pointer;vertical-align:middle}.pz-dg-crumb{position:relative}.pz-dg-browse-host{position:relative;padding-right:44px!important}.pz-dg-browse-host>.pz-dg-crumb{position:static}.pz-dg-browse-host .pz-dg-browse-arrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin:0}.pz-dg-launch.pz-dg-browse-arrow{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-left:4px;padding:0;border:0;border-radius:4px;color:inherit;background:transparent;vertical-align:middle;line-height:1}.pz-dg-browse-arrow::after,.pz-dg-arrow::after{content:"";display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid currentColor}.pz-dg-browse-arrow[aria-expanded="true"]::after{transform:rotate(180deg)}.pz-dg-browse-arrow:hover{background:#6c757d12}.pz-dg-browse-arrow:focus-visible{outline:2px solid #007bff;outline-offset:2px}.pz-dg-route-menu{top:calc(100% + 6px);left:auto;right:0;width:max-content;min-width:132px;max-width:min(260px,85vw);max-height:320px;overflow:auto;padding:4px;border:1px solid #adb5bd55;border-radius:8px;box-shadow:0 4px 16px #00000014;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);font-size:.875rem;z-index:1030}.pz-dg-route-menu>.dropdown-item{padding:5px 12px;border-radius:4px;font:inherit;line-height:1.4;white-space:normal;overflow-wrap:anywhere}.pz-dg-route-menu>.dropdown-item:hover,.pz-dg-route-menu>.dropdown-item:focus-visible{background:#007bff0d;color:#007bff}.pz-dg-route-menu>.pz-dg-selected{background:#007bff12;color:#007bff}.pz-dg-route-menu>.dropdown-divider{margin:4px 8px;border-color:#adb5bd33}.pz-dg-group-label{color:inherit}' +
+                '.pz-dg-panel[hidden],.pz-dg-launch[hidden],.pz-dg-choices[hidden],.pz-dg-create[hidden],.pz-dg-route-menu[hidden]{display:none!important}.pz-dg-launch{margin:0 0 0 10px;padding:3px 8px;border:1px solid #007bff;border-radius:5px;background:transparent;color:#007bff;font-size:.875em;cursor:pointer;vertical-align:middle}.pz-dg-crumb{position:relative}.pz-dg-browse-host{position:relative;padding-right:44px!important}.pz-dg-browse-host>.pz-dg-crumb{position:static}.pz-dg-browse-host .pz-dg-browse-arrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin:0}.pz-dg-launch.pz-dg-browse-arrow{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-left:4px;padding:0;border:0;border-radius:4px;color:inherit;background:transparent;vertical-align:middle;line-height:1}.pz-dg-browse-arrow::after,.pz-dg-arrow::after{content:"";display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid currentColor}.pz-dg-browse-arrow[aria-expanded="true"]::after{transform:rotate(180deg)}.pz-dg-browse-arrow:hover{background:#6c757d12}.pz-dg-browse-arrow:focus-visible{outline:2px solid #007bff;outline-offset:2px}.pz-dg-route-menu{top:calc(100% + 6px);left:auto;right:0;width:max-content;min-width:132px;max-width:min(260px,85vw);max-height:320px;overflow:auto;padding:4px;border:1px solid #adb5bd55;border-radius:8px;box-shadow:0 4px 16px #00000014;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);font-size:.875rem;z-index:1030}.pz-dg-route-menu>.dropdown-item{padding:5px 12px;border-radius:4px;font:inherit;line-height:1.4;white-space:normal;overflow-wrap:anywhere}.pz-dg-route-menu>.dropdown-item:hover,.pz-dg-route-menu>.dropdown-item:focus-visible{background:#007bff0d;color:#007bff}.pz-dg-route-menu>.pz-dg-selected{background:#007bff12;color:#007bff}.pz-dg-route-menu>.dropdown-divider{margin:4px 8px;border-color:#adb5bd33}.pz-dg-group-label{color:inherit}.pz-dg-settings-entry>.nav-link{width:100%;border:0;background:transparent;text-align:left;font:inherit}.pz-dg-settings-entry .fa-fw{margin-right:.5em}' +
                 '.pz-dg-panel{margin:10px 0 16px;padding:14px;border:1px solid #adb5bd55;border-radius:8px;font-size:.875rem}.pz-dg-head,.pz-dg-tools,.pz-dg-create,.pz-dg-editor-group{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.pz-dg-head{justify-content:space-between;margin-bottom:4px}.pz-dg-tools{margin-top:12px}.pz-dg-create{margin:10px 0}' +
                 '.pz-dg-button{border:0;background:transparent;color:#007bff;padding:5px 8px;cursor:pointer;font:inherit}.pz-dg-panel input,.pz-dg-panel select,.pz-dg-editor-group select,.pz-dg-choices input{font:inherit;border:1px solid #adb5bd66;border-radius:5px;padding:5px 8px;background:transparent;color:inherit;max-width:100%}.pz-dg-muted{color:#6c757d}.pz-dg-status:empty{display:none}.pz-dg-status{color:#b42318;margin:8px 0}' +
                 '.pz-dg-rows{max-height:55vh;overflow:auto}.pz-dg-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #adb5bd33}.pz-dg-row-text{flex:1;min-width:0}.pz-dg-row-text>a,.pz-dg-row-text>small{display:block;overflow-wrap:anywhere;white-space:pre-wrap}.pz-dg-row .pz-dg-picker{width:160px;flex-shrink:0}.pz-dg-picker>select{width:100%}.pz-dg-picker .pz-dg-create input{min-width:0;width:100%}' +
@@ -2129,7 +2175,137 @@
                 '.pz-dg-choices>.pz-dg-button{display:block;width:100%;text-align:left}.pz-dg-choices .pz-dg-create{flex-wrap:nowrap}.pz-dg-choices input{min-width:0;width:100%}.pz-dg-editor-group{margin:10px 0;font-size:.875rem}' +
                 '.pz-dg-pagination{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding-top:12px}.pz-dg-page-controls{display:flex;align-items:center;gap:6px}.pz-dg-page-button{background:transparent;color:#007bff;border:1px solid #adb5bd66;padding:5px 10px;border-radius:5px;font:inherit;cursor:pointer}.pz-dg-page-button:disabled{color:#6c757d;opacity:.5;cursor:default}.pz-dg-page-controls input{width:62px;text-align:center}' +
                 '.pz-dg-modal{z-index:1050;overflow:auto}.pz-dg-backdrop{z-index:1040}.pz-dg-modal .pz-dg-head{display:none}.pz-dg-modal .pz-dg-panel{margin:0;padding:0;border:0}.pz-dg-modal .modal-body{padding:1rem}.pz-dg-modal .pz-dg-rows{max-height:50vh}.pz-dg-modal .pz-dg-launch{display:none}' +
+                '.pz-dg-modal{display:flex!important;align-items:center;justify-content:center;padding:20px;font-size:14px}.pz-dg-modal .modal-dialog{width:100%;max-width:560px;margin:0;max-height:calc(100vh - 40px)}.pz-dg-modal .modal-content{max-height:calc(100vh - 40px);border-radius:10px;border:1px solid #adb5bd55;overflow:hidden;box-shadow:0 12px 48px #0003}.pz-dg-modal .modal-header{padding:14px 20px;align-items:center}.pz-dg-modal .modal-title{font-size:16px;font-weight:600;line-height:1.4}.pz-dg-modal .close{margin:0;padding:0;width:28px;height:28px;font-size:24px;line-height:1;opacity:.6}.pz-dg-modal .modal-body{padding:16px 20px;overflow:auto;min-height:0}.pz-dg-modal .modal-footer{padding:10px 20px}.pz-dg-modal .modal-footer .btn{font-size:14px;padding:6px 16px}.pz-dg-modal .pz-dg-panel{font-size:inherit}.pz-dg-modal .pz-dg-mode{font-size:12px;gap:8px;border-bottom:1px solid #adb5bd33;padding-bottom:12px;margin-bottom:12px}.pz-dg-mode-badge{background:#6c757d12;border-radius:4px;padding:3px 7px}.pz-dg-modal .pz-dg-share{margin-left:auto;font-size:12px;padding:4px 8px}.pz-dg-modal .pz-dg-tools{margin:0;gap:6px}.pz-dg-modal .pz-dg-tools>select{flex:1;min-width:130px;width:0;height:34px}.pz-dg-modal .pz-dg-button{padding:6px 8px;line-height:1.4;white-space:nowrap}.pz-dg-modal .pz-dg-secondary{border:1px solid #adb5bd66;border-radius:5px;color:#6c757d}.pz-dg-modal .pz-dg-danger{color:#c54545}.pz-dg-modal .pz-dg-rename{flex-basis:100%;margin:4px 0 0;padding:10px;background:#f8f9fa;border-radius:6px}.pz-dg-modal .pz-dg-rename>input{flex:1;min-width:100px;width:0}.pz-dg-modal .pz-dg-new-group{margin:12px 0;flex-wrap:nowrap;padding:10px;border:1px solid #adb5bd33;border-radius:6px;background:#f8f9fa}.pz-dg-modal .pz-dg-new-group>input{flex:1;min-width:0;width:0;background:var(--pt-bg,#fff)}.pz-dg-modal .pz-dg-new-group>button{background:#007bff;color:white;border-radius:5px;padding:6px 12px}.pz-dg-modal .pz-dg-rows{max-height:min(360px,42vh)}.pz-dg-modal .pz-dg-row{padding:10px 0;gap:12px}.pz-dg-modal .pz-dg-row .pz-dg-picker{width:128px}.pz-dg-modal .pz-dg-row-text>a{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;overflow:hidden;line-height:1.5}.pz-dg-modal .pz-dg-row-text>small{white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:12px;margin-top:3px}.pz-dg-empty{padding:24px 12px;text-align:center;color:#6c757d;border-radius:6px;background:#f8f9fa}.pz-dg-empty strong{display:block;font-size:14px;font-weight:500}.pz-dg-empty small{display:block;font-size:12px;line-height:1.5;margin-top:6px}.pz-dg-modal .pz-dg-pagination{font-size:12px;gap:8px;border-top:1px solid #adb5bd33;margin-top:8px;padding-top:10px}.pz-dg-pagination:empty{display:none}.pz-dg-modal .pz-dg-page-controls{gap:3px}.pz-dg-modal .pz-dg-page-controls input{width:42px;padding:4px}.pz-dg-modal .pz-dg-page-button{padding:4px 7px}@media(max-width:480px){.pz-dg-modal{padding:12px}.pz-dg-modal .modal-body{padding:12px}.pz-dg-modal .modal-header,.pz-dg-modal .modal-footer{padding:12px}.pz-dg-modal .pz-dg-row{align-items:flex-start}.pz-dg-modal .pz-dg-row .pz-dg-picker{width:100px}.pz-dg-modal .pz-dg-pagination{justify-content:center}.pz-dg-modal .pz-dg-mode small{flex:1}}' +
                 '.pz-dg-prompt-group{display:flex;flex-direction:column;gap:8px;margin-top:14px;font-size:.875rem}.pz-dg-prompt-group select,.pz-dg-prompt-group input{border:1px solid #adb5bd66;border-radius:5px;background:transparent;color:inherit;padding:7px 10px;font:inherit;width:100%}.pz-dg-prompt-group .pz-dg-create{flex-wrap:nowrap}.pz-dg-mode{display:flex;align-items:center;flex-wrap:wrap;gap:6px;color:#6c757d;font-size:.875em}';doc.head?.append(style);
+        }
+        sync();
+    }
+    if (doc.body) start();else doc.addEventListener('DOMContentLoaded', start, { once: true });
+})();
+
+// ===== 功能：在保存前检查中提示空白格式，并修复当前译文草稿 =====
+(() => {
+    'use strict';
+    const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window, doc = page.document;
+    const bindings = new Map();let destroyed = false, queued = false;
+    const H = '[ \\t\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000]';
+    const leading = new RegExp('^' + H + '*'), trailing = new RegExp(H + '*$'), blank = new RegExp('^' + H + '*$');
+    function parts(line) {
+        const before = leading.exec(line)[0], rest = line.slice(before.length), after = trailing.exec(rest)[0];
+        return { before, after, body: rest.slice(0, rest.length - after.length), blank: blank.test(line) };
+    }
+    function inspect(original, translation, lineBreak = '\n') {
+        original = String(original ?? '');translation = String(translation ?? '');
+        if (!translation || !original) return { issues: [], fixed: translation, repairable: false };
+        const custom = lineBreak && !/^\r?\n$|^\r$/.test(lineBreak) ? String(lineBreak) : '';
+        const escaped = custom.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const split = new RegExp('(\\r\\n|\\r|\\n' + (custom ? '|' + escaped : '') + ')');
+        const source = original.split(split), target = translation.split(split);
+        const sourceLines = source.filter((_, i) => i % 2 === 0).map(parts), targetLines = target.filter((_, i) => i % 2 === 0).map(parts);
+        const meaningfulSource = sourceLines.filter(line => !line.blank), meaningfulTarget = targetLines.filter(line => !line.blank);
+        if (!meaningfulSource.length) return { issues: [], fixed: translation, repairable: false };
+        const issues = [], equalBodies = meaningfulSource.length === meaningfulTarget.length;
+        const spaceName = value => {
+            const spaces = [...value].filter(char => char === ' ').length, tabs = [...value].filter(char => char === '\t').length, other = value.length - spaces - tabs;
+            return [spaces && `${spaces} 个空格`, tabs && `${tabs} 个制表符`, other && `${other} 个其他空白`].filter(Boolean).join('、') || '无空白';
+        };
+        let index = 0;
+        for (const [i, line] of sourceLines.entries()) {
+            if (line.blank) continue;
+            const translated = equalBodies ? meaningfulTarget[index++] : targetLines[i];if (!translated || translated.blank) continue;
+            if (line.before !== translated.before) issues.push(`第 ${i + 1} 行行首缩进不同：原文${spaceName(line.before)}，译文${spaceName(translated.before)}`);
+            if (line.after !== translated.after) issues.push(`第 ${i + 1} 行行尾空白不同：原文${spaceName(line.after)}，译文${spaceName(translated.after)}`);
+        }
+        const sameBlankLayout = sourceLines.length === targetLines.length && sourceLines.every((line, i) => line.blank === targetLines[i].blank);
+        if (!sameBlankLayout && (sourceLines.some(line => line.blank) || targetLines.some(line => line.blank))) issues.push('译文的空行数量或位置与原文不同');
+        else if (sameBlankLayout && sourceLines.some((line, i) => line.blank && source[i * 2] !== target[i * 2])) issues.push('空行中的空白字符与原文不同');
+        if (!equalBodies) issues.push('正文行数不同，无法仅通过调整空白修复');
+        let fixed = translation;
+        // 不拼接正文行。带自定义换行标签时，也不增删标签来修复空行。
+        const repairable = equalBodies && (!custom || sourceLines.length === targetLines.length && sameBlankLayout);
+        if (repairable) {
+            index = 0;
+            const eol = target.find((_, i) => i % 2 === 1) || source.find((_, i) => i % 2 === 1) || '\n';
+            const separators = target.filter((_, i) => i % 2 === 1);
+            const rebuilt = sourceLines.map((line, i) => line.blank ? source[i * 2] : line.before + meaningfulTarget[index++].body + line.after);
+            fixed = rebuilt.map((line, i) => line + (i < rebuilt.length - 1 ? custom ? separators[i] : eol : '')).join('');
+        }
+        return { issues, fixed, repairable: repairable && fixed !== translation };
+    }
+    function editor() {
+        let vm = doc.querySelector('.string-editor')?.__vue__;
+        for (let i = 0; vm && i < 16; i++, vm = vm.$parent) if (vm.$options?.name === 'stringEditor' && vm.item && typeof vm.preSaveCheck === 'function') return vm;
+        return null;
+    }
+    function snapshot(vm) { return { vm, id: Number(vm.item.id), project: String(vm.projectId), original: String(vm.item.original ?? ''), text: String(vm.translation ?? '') }; }
+    function current(value) { const vm = value.vm;return editor() === vm && Number(vm.item?.id) === value.id && String(vm.projectId) === value.project && String(vm.item.original ?? '') === value.original && String(vm.translation ?? '') === value.text; }
+    function node(tag, text, className) { const el = doc.createElement(tag);if (text != null) el.textContent = text;if (className) el.className = className;return el; }
+    function removeUI(binding) { binding.ui?.remove();binding.ui = null;binding.stamp = ''; }
+    function queue() { if (queued || destroyed) return;queued = true;page.requestAnimationFrame(() => { queued = false;if (!destroyed) sync(); }); }
+    function unbind(binding) {
+        if (binding.checking) binding.vm.onConfirmCancel?.();
+        if (binding.vm.preSaveCheck === binding.wrapper) binding.vm.preSaveCheck = binding.original;
+        removeUI(binding);bindings.delete(binding.vm);
+    }
+    function bind(vm) {
+        if (bindings.has(vm)) return bindings.get(vm);
+        const binding = { vm, original: vm.preSaveCheck, checking: null, ui: null, stamp: '' };
+        binding.wrapper = function(...args) {
+            if (binding.checking) return false;
+            const captured = snapshot(this), analysis = inspect(captured.original, captured.text, this.lineBreakChar);
+            let result;
+            try { result = binding.original.call(this, ...args); } catch (error) { throw error; }
+            if (!analysis.issues.length) return result;
+            // 网站已有检查失败时，复用它正在打开的同一个弹窗。
+            if (result === true && analysis.issues.length && this.$bvModal?.show) {
+                result = new Promise(resolve => {
+                    this.onConfirmOK = () => resolve(true);this.onConfirmCancel = () => resolve(false);this.onConfirmHidden = () => resolve(null);
+                    this.$bvModal.show('tagConfirm');
+                });
+            }
+            if (!result?.then) return result;
+            binding.checking = { captured, analysis };queue();
+            return Promise.resolve(result).then(ok => current(captured) ? ok : false).finally(() => { binding.checking = null;removeUI(binding);queue(); });
+        };
+        vm.preSaveCheck = binding.wrapper;vm.$once?.('hook:beforeDestroy', () => unbind(binding));bindings.set(vm, binding);return binding;
+    }
+    function repair(binding) {
+        const check = binding.checking;if (!check) return;
+        const { captured, analysis } = check, vm = binding.vm;
+        if (!current(captured) || vm.canEdit === false || vm.saving || vm.polishing || !analysis.repairable) return;
+        // replace 使用网站自己的编辑器撤销历史；不提交、不改变词条状态。
+        vm.$refs?.editor?.replace?.(analysis.fixed);
+        if (String(vm.translation ?? '') !== analysis.fixed) vm.translation = analysis.fixed;
+        vm.onTranslationChange?.(analysis.fixed);
+        // 本次保存按取消处理，避免保存入口使用修复前的文本快照继续提交。
+        vm.onConfirmCancel?.();vm.$bvModal?.hide?.('tagConfirm');removeUI(binding);
+        vm.$alert?.success?.('空白格式已修复，请重新点击保存');
+    }
+    function sync() {
+        if (destroyed) return;
+        const vm = editor();for (const [old, binding] of bindings) if (old !== vm || old._isDestroyed) unbind(binding);
+        if (!vm) return;
+        const binding = bind(vm), check = binding.checking;
+        if (!check || !check.analysis.issues.length) { removeUI(binding);return; }
+        const body = doc.getElementById('tagConfirm___BV_modal_body_') || doc.querySelector('#tagConfirm .modal-body');if (!body) return;
+        const usable = current(check.captured) && vm.canEdit !== false && !vm.saving && !vm.polishing;
+        const stamp = JSON.stringify([check.captured.id, check.captured.text, check.analysis.issues, usable]);
+        if (binding.ui?.isConnected && binding.ui.parentElement === body && binding.stamp === stamp) return;
+        removeUI(binding);binding.stamp = stamp;
+        const ui = node('section', null, 'pz-whitespace-check'), heading = node('div', null, 'pz-whitespace-heading');
+        heading.append(node('i', null, 'far fa-exclamation-circle'), node('strong', '空白格式检查'));
+        const list = node('ul');for (const issue of check.analysis.issues.slice(0, 6)) list.append(node('li', issue));
+        if (check.analysis.issues.length > 6) list.append(node('li', `另有 ${check.analysis.issues.length - 6} 处空白格式不同`));
+        const controls = node('div', null, 'pz-whitespace-actions'), fix = node('button', '修复空格', 'btn btn-outline-primary btn-sm');fix.type = 'button';fix.disabled = !usable || !check.analysis.repairable;
+        fix.addEventListener('click', event => { event.preventDefault();event.stopPropagation();repair(binding); });
+        controls.append(fix, node('small', check.analysis.repairable ? '按原文恢复缩进及行尾空白；修复后重新保存。' : '正文行或换行标签不同，需手动调整。'));
+        ui.append(heading, list, controls);body.append(ui);binding.ui = ui;
+    }
+    const api = { version: '1.8.3', inspect, sync, destroy() { destroyed = true;for (const binding of [...bindings.values()]) unbind(binding);if (page.ParaTranzWhitespaceCheck === api) delete page.ParaTranzWhitespaceCheck; } };
+    page.ParaTranzWhitespaceCheck = api;
+    function start() {
+        if (!doc.getElementById('pz-whitespace-check-style')) {
+            const style = node('style');style.id = 'pz-whitespace-check-style';style.textContent = '.pz-whitespace-check{margin-top:14px;padding-top:12px;border-top:1px solid #adb5bd55;font-size:.875rem}.pz-whitespace-heading{display:flex;align-items:center;gap:7px}.pz-whitespace-heading strong{font-weight:500}.pz-whitespace-check ul{padding-left:22px;margin:8px 0;line-height:1.6}.pz-whitespace-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.pz-whitespace-actions small{color:#6c757d}';doc.head?.append(style);
         }
         sync();
     }
