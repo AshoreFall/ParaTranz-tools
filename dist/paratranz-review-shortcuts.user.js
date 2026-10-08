@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.5.2
+// @version      1.5.3
 // @description  检查与审核、空译文保存保留状态、注释 @ 补全、分页记忆，以及代码术语和格式标签的悬浮说明。
 // @match        https://paratranz.cn/projects/*/strings*
 // @grant        unsafeWindow
-// @run-at       document-idle
+// @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/AshoreFall/ParaTranz-tools/main/dist/paratranz-review-shortcuts.meta.js
 // @downloadURL  https://raw.githubusercontent.com/AshoreFall/ParaTranz-tools/main/dist/paratranz-review-shortcuts.user.js
 // ==/UserScript==
@@ -134,11 +134,11 @@
                 // 当前草稿和选中词条未变化时，才通知网站刷新列表。
                 if (preserveStage && draftKey) vm.$ss?.remove?.(draftKey);
                 vm.$emit('save', result);
-                tell(vm, 'success', preserveStage ? `空译文已保存，状态保留为${stageName(targetStage)}（服务器已确认）` :
-                    `词条已标记为${stageName(targetStage)}（服务器已确认）`);
+                tell(vm, 'success', preserveStage ? `空译文已保存，状态保留为${stageName(targetStage)}` :
+                    `词条已标记为${stageName(targetStage)}`);
             } else {
                 tell(vm, 'success', preserveStage ? `原词条 ${id} 的空译文已保存，状态保留为${stageName(targetStage)}；当前编辑内容已保留。` :
-                    `原词条 ${id} 已标记为${stageName(targetStage)}（服务器已确认）；当前编辑内容已保留。`);
+                    `原词条 ${id} 已标记为${stageName(targetStage)}；当前编辑内容已保留。`);
             }
         } catch (error) {
             tell(vm, 'error', error?.message || '标记失败，请稍后重试');
@@ -206,6 +206,7 @@
         const control = mainControl;
         control.button.removeEventListener('click', control.handler, true);
         control.button.removeAttribute('data-pz-main-action');
+        control.button.removeAttribute('data-pz-checking');
         for (const [element, styles] of control.styles) {
             for (const [property, value, priority] of styles) {
                 if (value) element.style.setProperty(property, value, priority);
@@ -237,7 +238,16 @@
                 event.preventDefault();
                 event.stopImmediatePropagation();
                 const current = editorVM(), currentStage = Number(current?.item?.stage);
-                if (current !== vm || current.canSave || !current.canReview || pending || current.saving || !allowed(current)) return;
+                if (current !== vm || pending || current.saving) return;
+                // Vue 会复用这个按钮；输入译文或切到未翻译词条后，旧的检查监听可能还没清理。
+                // 此时明确走原生保存，成功后的下一条跳转也由网站处理，避免吞掉点击或跳两次。
+                if (current.canSave) {
+                    restoreMainButton();
+                    if (current.canEdit) Promise.resolve(current.saveItem()).catch(error =>
+                        tell(current, 'error', error?.message || '保存失败，请稍后重试'));
+                    return;
+                }
+                if (!current.canReview || !allowed(current)) return;
                 if (currentStage === 3) setCurrentStage(5);
                 else if (currentStage > 0 && currentStage < 3) setCurrentStage(3);
             };
@@ -245,15 +255,16 @@
             if (doc.head && !doc.getElementById('pz-main-action-style')) {
                 const style = doc.createElement('style');
                 style.id = 'pz-main-action-style';
-                style.textContent = '[data-pz-main-action] svg { display: none !important; }' +
-                    '[data-pz-main-action]::before { margin-right: .35em; }' +
-                    '[data-pz-main-action="3"]::before { content: "☺"; }' +
-                    '[data-pz-main-action="5"]::before { content: "✓"; }';
+                style.textContent = '[data-pz-main-action="3"] svg, [data-pz-main-action="3"] > i { display: none !important; }' +
+                    '[data-pz-main-action="3"]::before { content: "☺"; display: inline-block; margin-right: .35em; font-size: 1.4em; line-height: 1; vertical-align: -.1em; }' +
+                    '[data-pz-checking]::before { animation: pz-smile-nod .7s ease-in-out infinite; }' +
+                    '@keyframes pz-smile-nod { 0%, 100% { transform: rotate(-7deg); } 50% { transform: translateY(-2px) rotate(7deg) scale(1.08); } }' +
+                    '@media (prefers-reduced-motion: reduce) { [data-pz-checking]::before { animation: none; } }';
                 doc.head.appendChild(style);
             }
             const styles = new Map();
             for (const element of [button, toggle].filter(Boolean)) {
-                styles.set(element, ['background-color', 'border-color', 'color'].map(property =>
+                styles.set(element, ['background-color', 'background-image', 'border-color', 'color'].map(property =>
                     [property, element.style.getPropertyValue(property), element.style.getPropertyPriority(property)]));
             }
             mainControl = { button, handler, styles, vm,
@@ -266,9 +277,20 @@
         button.title = text;
         button.disabled = Boolean(disabledReason(vm));
         if (button.getAttribute('data-pz-main-action') !== String(target)) button.setAttribute('data-pz-main-action', String(target));
+        // 检查提交期间让笑脸轻轻晃动；审核仍用网站原有的勾和转圈图标。
+        if (target === 3 && (pending || vm.saving)) {
+            if (button.getAttribute('data-pz-checking') !== 'true') button.setAttribute('data-pz-checking', 'true');
+        } else button.removeAttribute('data-pz-checking');
         for (const element of mainControl.styles.keys()) {
+            // 网站按钮自带绿色渐变，必须去掉它，才能显示“已检查”徽标的青绿色。
             for (const [property, value] of [['background-color', color], ['border-color', color], ['color', '#fff']]) {
                 if (element.style.getPropertyValue(property) !== value) element.style.setProperty(property, value, 'important');
+            }
+            if (target === 3) element.style.setProperty('background-image', 'none', 'important');
+            else {
+                const [, value, priority] = mainControl.styles.get(element).find(([property]) => property === 'background-image');
+                if (value) element.style.setProperty('background-image', value, priority);
+                else element.style.removeProperty('background-image');
             }
         }
     }
@@ -276,6 +298,7 @@
     function sync() {
         scheduled = false;
         syncPaging();
+        rememberPagingURL();
         syncEmptySaving();
         syncCodeHints();
         if (!/^\/projects\/\d+\/strings\/?$/.test(page.location.pathname)) {
@@ -605,12 +628,64 @@
     }
 
     function pagingVM() {
-        let vm = doc.querySelector('.strings')?.__vue__;
-        for (let count = 0; vm && count < 8; count++, vm = vm.$parent) {
-            if (vm.$options?.name === 'strings' && typeof vm.fetchStrings === 'function' &&
-                typeof vm.initStrings === 'function' && typeof vm.$watch === 'function') return vm;
+        // 根节点可能被路由外壳占用；从已经识别的词条编辑器向上找也能找到列表。
+        const starts = [editorVM(), doc.querySelector('.strings')?.__vue__,
+            doc.querySelector('.strings .pagination-footer')?.__vue__];
+        for (let vm of starts) {
+            for (let count = 0; vm && count < 16; count++, vm = vm.$parent) {
+                if (vm.$options?.name === 'strings' && !vm._isDestroyed && !vm._isBeingDestroyed &&
+                    typeof vm.fetchStrings === 'function' && typeof vm.initStrings === 'function' &&
+                    typeof vm.$watch === 'function') return vm;
+            }
         }
         return null;
+    }
+
+    // ===== 功能：刷新前记录位置，页面最早加载时处理旧的词条定位 =====
+    function pagingURL() {
+        if (typeof page.URL !== 'function' || !page.location.href) return null;
+        const url = new page.URL(page.location.href);
+        return /^\/projects\/\d+\/strings\/?$/.test(url.pathname) && !url.searchParams.has('id') ? url : null;
+    }
+
+    function pagingURLKey(url) {
+        const filters = [...url.searchParams].filter(([key]) => !['page', 'pageSize', 'anchor', 'ref', 'detailed'].includes(key));
+        filters.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+        return 'paratranz-tools.refresh.' + JSON.stringify([url.pathname, filters]);
+    }
+
+    function rememberPagingURL() {
+        const url = pagingURL();
+        if (!url) return;
+        const vm = pagingVM();
+        const data = vm && !vm.loading ? vm.strings : null;
+        const current = positiveNumber(url.searchParams.get('page')) || positiveNumber(data?.page) || 1;
+        const size = positiveNumber(url.searchParams.get('pageSize'), 800) || positiveNumber(data?.pageSize, 800) || 50;
+        // 只有当前列表确实属于这一页，才记住选中的词条；不沿用另一页的旧 anchor。
+        const selected = Number(data?.page) === current && Number(data?.pageSize) === size &&
+            data?.results?.some(item => Number(item.id) === Number(vm.active)) ? String(vm.active) : '';
+        try {
+            page.sessionStorage.setItem(pagingURLKey(url), JSON.stringify({ page: current, pageSize: size, selected }));
+        } catch { /* 存储不可用时，刷新仍按地址中的页码加载。 */ }
+    }
+
+    function restorePagingURL() {
+        const url = pagingURL();
+        const reloading = page.performance?.getEntriesByType?.('navigation')?.[0]?.type === 'reload' ||
+            page.performance?.navigation?.type === 1;
+        if (!url || !reloading || typeof page.history?.replaceState !== 'function') return;
+        let memory;
+        try { memory = JSON.parse(page.sessionStorage.getItem(pagingURLKey(url))); } catch { /* 无记忆也可清理旧定位。 */ }
+        const current = positiveNumber(url.searchParams.get('page')) || positiveNumber(memory?.page);
+        if (!current) return;
+        const size = positiveNumber(url.searchParams.get('pageSize'), 800) || positiveNumber(memory?.pageSize, 800) || 50;
+        url.searchParams.set('page', String(current));
+        url.searchParams.set('pageSize', String(size));
+        if (Number(memory?.page) === current && Number(memory?.pageSize) === size && positiveNumber(memory?.selected)) {
+            url.searchParams.set('anchor', memory.selected);
+        } else url.searchParams.delete('anchor');
+        // document-start 时先整理地址，网站的第一条请求就不会被旧 anchor 拉回别的页。
+        if (url.href !== page.location.href) page.history.replaceState(page.history.state, '', url.href);
     }
 
     function pagingKey(vm) {
@@ -762,9 +837,20 @@
     }
 
     // ===== 启动与页面切换 =====
-    new page.MutationObserver(schedule).observe(doc.body, { childList: true, subtree: true, characterData: true });
-    page.setInterval(schedule, 700);
+    restorePagingURL();
+    function start() {
+        new page.MutationObserver(schedule).observe(doc.body, { childList: true, subtree: true, characterData: true });
+        page.setInterval(schedule, 700);
+        sync();
+    }
+    if (doc.body) start();
+    else doc.addEventListener('DOMContentLoaded', start, { once: true });
+    page.addEventListener('pagehide', rememberPagingURL);
+    page.addEventListener('beforeunload', rememberPagingURL);
     page.addEventListener('popstate', schedule);
-    sync();
+    // 输入框的 value 变化不会触发 DOM 观察；及时卸下旧的检查监听，恢复保存按钮。
+    doc.addEventListener('input', event => {
+        if (event.target?.closest?.('.string-editor')) schedule();
+    }, true);
 
 })();
