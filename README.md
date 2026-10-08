@@ -1,4 +1,4 @@
-# HARDER BETTER FASTER STRONGER 的 ParaTranz！
+# HARDER, BETTER, FASTER, STRONGER 的 ParaTranz！
 
 ParaTranz-tools 是一个给 ParaTranz 词条编辑页面用的小脚本，补上几个平时校对时不太顺手的地方。
 
