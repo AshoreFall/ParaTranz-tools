@@ -1,11 +1,9 @@
 // ==UserScript==
 // @name         ParaTranz-tools
 // @namespace    local.paratranz.review-shortcut
-// @version      1.8.6
+// @version      1.9.0
 // @description  检查与审核、空译文保存、空白格式检查、标点锁定、注释 @ 补全、分页记忆、代码悬浮说明、插件管理，以及疑问分组和项目共享。
-// @match        https://paratranz.cn/projects/*/strings*
-// @match        https://paratranz.cn/projects/*/issues*
-// @match        https://paratranz.cn/projects/*/settings*
+// @match        https://paratranz.cn/*
 // @grant        unsafeWindow
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/AshoreFall/ParaTranz-tools/main/dist/paratranz-review-shortcuts.meta.js
@@ -1552,7 +1550,7 @@
                 if (decode(issue.content)?.kind === 'init') { if (!Array.isArray(issue.activities)) throw new Error('项目分组读取失败：缺少变更记录');roots.push(issue); }
             }
             const managers = roots.length ? await readManagers(ctx) : new Set();
-            current.roots = roots;current.managers = managers;current.value = roots.length ? reduce(roots, managers).value : null;current.known = true;return current.value;
+            current.roots = roots;current.managers = managers;current.value = reduce(roots, managers).value;current.known = true;return current.value;
         })().finally(() => { current.pending = null; });
         return current.pending;
     }
@@ -1575,9 +1573,26 @@
     }
     function write(ctx, fields) {
         const operation = { ...fields, v: 1, opId: token() };
-        return serialized(ctx, async () => {
+        return serialized(ctx, () => writeNow(ctx, operation));
+    }
+    async function createRoot(ctx, init) {
+        const current = session(ctx);
+        try {
+            const issue = unwrap(await ctx.vm.$req.post(`/projects/${ctx.projectId}/issues`, { title: TITLE, content: encode(init) }));
+            if (!positive(issue?.id) || String(issue.uid) !== String(ctx.userId) || decode(issue.content)?.opId !== init.opId) throw new Error('共享分组创建响应不完整');
+            current.roots = [{ ...issue, activities: Array.isArray(issue.activities) ? issue.activities : [] }];current.value = reduce(current.roots, current.managers).value;current.known = true;return current.value;
+        } catch (error) {
+            try { await discover(ctx, true);if (reduce(current.roots, current.managers).seen.has(init.opId)) return current.value; } catch { /* 保留原始错误 */ }
+            throw new Error(`共享分组未能保存：${error.message}`);
+        }
+    }
+    async function writeNow(ctx, operation) {
             const value = await discover(ctx, true), current = session(ctx);
-            if (!value) throw new Error('项目共享分组已不存在，请刷新后重试');validate(operation, value, ctx);
+            if (!value) throw new Error('请等待项目加载完成');validate(operation, value, ctx);
+            if (!current.roots.length) {
+                if (operation.kind === 'assign' && !operation.groupId) return value;
+                return createRoot(ctx, { v: 1, opId: operation.opId, kind: 'init', groups: [operation.group], assignments: {} });
+            }
             const root = current.roots.slice().sort((a, b) => Number(a.id) - Number(b.id))[0];
             let reply;
             try {
@@ -1589,22 +1604,53 @@
                 throw new Error(`共享分组未能保存：${error.message}`);
             }
             root.activities.push(reply);current.value = reduce(current.roots, current.managers).value;return current.value;
-        });
     }
+    function historicalGroups(current) {
+        const ids = new Set();
+        for (const root of current.roots) for (const record of [root, ...(root.activities || [])]) {
+            const operation = decode(record.content);if (!operation) continue;
+            if (operation.kind === 'init') for (const group of operation.groups || []) if (validId(group.id)) ids.add(group.id);
+            if (operation.kind === 'create' && validId(operation.group?.id)) ids.add(operation.group.id);
+        }
+        return ids;
+    }
+    // 兼容旧版本调用；新版在创建第一组时自动初始化，不需要启用开关。
     function enable(ctx, local) {
         return serialized(ctx, async () => {
-            if (await discover(ctx, true)) return session(ctx).value;
+            await discover(ctx, true);if (session(ctx).roots.length) return session(ctx).value;
             const init = { v: 1, opId: token(), kind: 'init', groups: local.groups, assignments: local.assignments };
-            const content = encode(init);
-            const issue = unwrap(await ctx.vm.$req.post(`/projects/${ctx.projectId}/issues`, { title: TITLE, content }));
-            if (!positive(issue?.id) || String(issue.uid) !== String(ctx.userId) || decode(issue.content)?.opId !== init.opId) throw new Error('共享分组创建响应不完整，请刷新检查项目讨论后再试');
-            const current = session(ctx);current.roots = [{ ...issue, activities: Array.isArray(issue.activities) ? issue.activities : [] }];current.value = reduce(current.roots, current.managers).value;current.known = true;
-            // 同时启用产生的多个存储讨论会在刷新时合并，统一向 ID 最小的一条追加。
+            return createRoot(ctx, init);
+        });
+    }
+    function importLegacy(ctx, local) {
+        return serialized(ctx, async () => {
+            await discover(ctx, true);const current = session(ctx);
+            if (!local.groups.length) return current.value;
+            if (!current.roots.length) return createRoot(ctx, { v: 1, opId: token(), kind: 'init', groups: local.groups, assignments: local.assignments });
+            const historical = historicalGroups(current), imported = new Map(), resumable = new Map();
+            for (const root of current.roots) for (const record of root.activities || []) {
+                const operation = decode(record.content);
+                if (operation?.kind === 'create' && operation.legacyImport === String(ctx.userId) && String(record.lastEdit || record.uid) === String(ctx.userId)) resumable.set(operation.group?.id, operation.group?.name);
+            }
+            for (const group of local.groups) {
+                // 旧组已经进入过共享记录时，不恢复其旧名字、旧分组或被删除的组。
+                if (historical.has(group.id)) {
+                    const existing = current.value.groups.find(item => item.id === group.id && item.name === resumable.get(group.id));
+                    if (existing) imported.set(group.id, existing.id);
+                    continue;
+                }
+                let existing = current.value.groups.find(item => item.name === group.name);
+                if (!existing) { await writeNow(ctx, { v: 1, opId: token(), kind: 'create', legacyImport: String(ctx.userId), group: { id: group.id, name: group.name } });existing = current.value.groups.find(item => item.id === group.id || item.name === group.name); }
+                if (existing) imported.set(group.id, existing.id);
+            }
+            for (const [id, groupId] of Object.entries(local.assignments || {})) if (positive(id) && imported.has(groupId) && !current.value.assignments[id]) {
+                await writeNow(ctx, { v: 1, opId: token(), kind: 'assign', stringId: Number(id), groupId: imported.get(groupId) });
+            }
             return current.value;
         });
     }
     page.ParaTranzDisputeGroupSharing = {
-        version: '1.8.2', discover, enable, write,
+        version: '1.9.0', discover, enable, write, importLegacy,
         canManage(ctx, groupId) { const current = session(ctx), group = current.value?.groups.find(group => group.id === groupId);return !!group && (group.createdBy === String(ctx.userId) || current.managers.has(String(ctx.userId))); },
         known(ctx) { return session(ctx).known; },
         value(ctx) { return session(ctx).value; },
@@ -1618,7 +1664,7 @@
     const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window, doc = page.document;
     const KEY = 'paratranz-tools.dispute-groups.v1', bindings = new Map(), nativeLists = new Map();
     let data = {}, mounted = null, contextKey = '', overviewOpen = false, filter = 'all', listPage = 1, rows = [], loaded = false, loading = false, request = 0, signature = '', queued = false, serial = 0, destroyed = false;
-    const PAGE_SIZE = 10, sharing = page.ParaTranzDisputeGroupSharing;
+    const PAGE_SIZE = 10, sharing = page.ParaTranzDisputeGroupSharing, migrations = new Map();
     try { data = JSON.parse(page.localStorage.getItem(KEY)) || {}; } catch { /* 首次使用 */ }
     if (typeof data !== 'object' || Array.isArray(data)) data = {};
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -1652,7 +1698,23 @@
         const group = localState(ctx).groups.find(group => group.id === groupId), permission = Number(ctx.vm?.$store?.state?.permissions?.[ctx.projectId]);
         return !!group && (group.createdBy === ctx.userId || [3, 10].includes(permission));
     }
-    function ready(ctx, action) { return sharing && !sharing.known(ctx) ? sharing.discover(ctx).then(action) : action(); }
+    function ready(ctx, action) {
+        if (!sharing) return action();
+        const key = `${ctx.userId}:${ctx.projectId}`;
+        if (!migrations.has(key)) {
+            const task = (async () => {
+                await sharing.discover(ctx);
+                const local = localState(ctx);
+                if (local.groups.length && !local.sharedMigrated) {
+                    await sharing.importLegacy(ctx, copy(local));
+                    try { change(value => { value.sharedMigrated = true; }, ctx); }
+                    catch { localState(ctx).sharedMigrated = true; /* 共享已保存；浏览器备份写满不阻断后续操作 */ }
+                }
+            })().finally(() => migrations.delete(key));
+            migrations.set(key, task);
+        }
+        return migrations.get(key).then(action);
+    }
     async function refreshShared(ctx = context()) { if (sharing) await sharing.discover(ctx, true);signature = '';queue(); }
     async function sharedWrite(ctx, operation) { await sharing.write(ctx, operation);signature = '';queue(); }
     function change(fn, ctx = context()) {
@@ -1969,6 +2031,7 @@
         finally { if (ticket === request) { loading = false;signature = '';render(); } }
     }
     function closeOverview() {
+        if (mounted?.settingsView) { navigateSettings(false);return; }
         overviewOpen = false;request++;loading = false;
         if (mounted?.overlay) {
             mounted.panel.hidden = true;mounted.host.prepend(mounted.status, mounted.panel);
@@ -1980,6 +2043,7 @@
         render();
     }
     function openOverview() {
+        if (context().route === 'settings') return navigateSettings(true);
         if (!overviewOpen) { filter = 'all';listPage = 1; }overviewOpen = true;signature = '';sync();
         if (mounted && !mounted.overlay) {
             const overlay = node('div', null, 'modal show pz-dg-modal');overlay.setAttribute('role', 'dialog');overlay.setAttribute('aria-modal', 'true');overlay.setAttribute('aria-label', '疑问分组');overlay.style.display = 'block';
@@ -2002,7 +2066,7 @@
         const current = state();if (filter !== 'all' && filter !== 'none' && !current.groups.some(group => group.id === filter)) { filter = 'all';listPage = 1; }
         const selected = rows.filter(row => filter === 'all' || (current.assignments[String(row.id)] || 'none') === filter);
         const totalPages = Math.max(1, Math.ceil(selected.length / PAGE_SIZE));listPage = Math.min(Math.max(1, listPage), totalPages);
-        const stamp = JSON.stringify([loading, loaded, filter, listPage, current, sharing?.issueId(context()), rows.map(row => [row.id, row.stage, row.original, row.translation])]);
+        const stamp = JSON.stringify([loading, loaded, filter, listPage, current, canManageGroup(filter), sharing?.issueId(context()), rows.map(row => [row.id, row.stage, row.original, row.translation])]);
         if (signature === stamp) return;
         if (mounted.content.contains(doc.activeElement) && doc.activeElement?.tagName === 'INPUT') return;
         signature = stamp;
@@ -2013,20 +2077,6 @@
         }
         picker.value = filter;picker.addEventListener('change', () => { filter = picker.value;listPage = 1;signature = '';render(); });
         const reload = button('刷新', loadRows, 'pz-dg-button pz-dg-secondary');reload.disabled = loading;tools.append(picker, reload);
-        if (mounted.mode) {
-            const ctx = context(), shared = sharing?.value(ctx);
-            mounted.mode.replaceChildren();
-            if (shared) {
-                const link = node('a', `项目 ${ctx.projectId} · 共享分组`);link.href = `/projects/${ctx.projectId}/issues/${sharing.issueId(ctx)}`;mounted.mode.append(link);
-            } else {
-                mounted.mode.append(node('span', '个人分组', 'pz-dg-mode-badge'), node('small', '仅保存在当前浏览器', 'pz-dg-muted'));
-                if (sharing) {
-                    const enable = button('启用项目共享', async () => {
-                    await sharing.enable(ctx, copy(localState(ctx)));signature = '';queue();
-                    }, 'pz-dg-button pz-dg-share');enable.title = '把分组标记保存到项目讨论，装有脚本的成员可共享。';mounted.mode.append(enable);
-                }
-            }
-        }
         if (current.groups.some(group => group.id === filter) && canManageGroup(filter)) {
             const rename = node('form', null, 'pz-dg-create pz-dg-rename'), name = node('input');name.value = current.groups.find(group => group.id === filter).name;name.maxLength = 50;name.setAttribute('aria-label', '修改分组名');rename.hidden = true;
             const save = node('button', '保存', 'pz-dg-button');save.type = 'submit';rename.append(name, save, button('取消', () => { rename.hidden = true; }));
@@ -2069,6 +2119,62 @@
         }
         mounted.content.replaceChildren(tools, create, list, pagination);
     }
+    function settingsSelected(ctx = context()) {
+        if (ctx.route !== 'settings') return false;
+        return String(ctx.vm?.$route?.query?.pzDisputes || new page.URLSearchParams(page.location.search || '').get('pzDisputes') || '') === '1';
+    }
+    async function navigateSettings(selected) {
+        const ctx = context(), query = { ...(ctx.vm?.$route?.query || Object.fromEntries(new page.URLSearchParams(page.location.search || ''))) };
+        if (selected) query.pzDisputes = '1';else delete query.pzDisputes;
+        if (ctx.vm?.$router) {
+            try { await ctx.vm.$router.push({ path: page.location.pathname, query, hash: ctx.vm.$route?.hash || '' }); }
+            catch (error) { if (error.name !== 'NavigationDuplicated') throw error; }
+        } else {
+            const url = new page.URL(page.location.href);url.search = new page.URLSearchParams(query).toString();page.history.pushState(null, '', url.href);
+        }
+        sync();return mounted?.settingsTask;
+    }
+    function restoreSettingsView() {
+        const view = mounted?.settingsView;if (!view) return;
+        mounted.host.prepend(mounted.status, mounted.panel);mounted.panel.hidden = true;
+        for (const element of view.hidden) element.classList.remove('pz-dg-native-hidden');
+        if (view.path === page.location.pathname) for (const [element, current] of view.active) {
+            if (element.isConnected && !element.classList.contains('active')) { element.classList.add('active');if (current !== null) element.setAttribute('aria-current', current); }
+        }
+        mounted.settingsItem?.querySelector('.nav-link')?.classList.remove('active');
+        mounted.settingsItem?.querySelector('.nav-link')?.removeAttribute('aria-current');
+        view.crumb?.remove();view.section.remove();mounted.settingsView = null;mounted.settingsTask = null;
+        overviewOpen = false;loading = false;request++;signature = '';
+    }
+    function syncSettingsView(ctx) {
+        if (!mounted) return;
+        if (!settingsSelected(ctx)) { restoreSettingsView();return; }
+        const aside = mounted.host.querySelector('aside'), right = aside?.nextElementSibling;
+        if (!right) return;
+        if (mounted.settingsView && (mounted.settingsView.right !== right || mounted.settingsView.path !== page.location.pathname)) restoreSettingsView();
+        if (!mounted.settingsView) {
+            if (mounted.overlay) closeOverview();
+            const section = node('section', null, 'pz-dg-settings-page');section.append(node('h3', '疑问管理'), mounted.status, mounted.panel);right.append(section);
+            mounted.settingsView = { right, section, path: page.location.pathname, hidden: new Set(), active: new Map(), crumb: null };
+            overviewOpen = true;filter = 'all';listPage = 1;signature = '';
+            mounted.settingsTask = loadRows();
+        }
+        const view = mounted.settingsView, hide = element => {
+            if (!element.classList.contains('pz-dg-native-hidden')) { element.classList.add('pz-dg-native-hidden');view.hidden.add(element); }
+        };
+        for (const child of right.children) if (child !== view.section) hide(child);
+        for (const link of aside.querySelectorAll('.nav-link.active')) if (!link.closest('.pz-dg-settings-entry')) {
+            if (!view.active.has(link)) view.active.set(link, link.getAttribute('aria-current'));
+            link.classList.remove('active');link.removeAttribute('aria-current');
+        }
+        const control = mounted.settingsItem?.querySelector('.nav-link');control?.classList.add('active');control?.setAttribute('aria-current', 'page');
+        const breadcrumb = mounted.host.querySelector('.breadcrumb');
+        if (breadcrumb && view.crumb?.parentElement !== breadcrumb) {
+            view.crumb?.remove();
+            const items = [...breadcrumb.children];if (items.length > 2) for (const item of items) if (item.classList.contains('active')) hide(item);
+            view.crumb = node('li', '疑问管理', 'breadcrumb-item active pz-dg-settings-crumb');view.crumb.setAttribute('aria-current', 'page');breadcrumb.append(view.crumb);
+        }
+    }
     function placeLaunch(ctx) {
         if (!mounted) return;
         const { host, launch } = mounted;
@@ -2078,7 +2184,7 @@
             if (!mounted.settingsItem?.isConnected) {
                 mounted.settingsItem?.remove();
                 const item = node('li', null, 'nav-item pz-dg-settings-entry'), control = button('', openOverview, 'nav-link');
-                const icon = node('i', null, 'fad fa-circle-question fa-fw');icon.setAttribute('aria-hidden', 'true');control.append(icon, node('span', '疑问管理'));item.append(control);
+                const icon = node('i', null, 'fad fa-circle-question fa-fw');icon.setAttribute('aria-hidden', 'true');control.append(icon, doc.createTextNode(' '), node('span', '疑问管理'));item.append(control);
                 const comments = [...nav.querySelectorAll('a')].find(link => /\/settings\/comments\/?$/.test(link.getAttribute('href') || ''))?.closest('.nav-item');
                 if (comments) comments.after(item);else nav.append(item);mounted.settingsItem = item;
             }
@@ -2114,6 +2220,7 @@
     }
     function teardown() {
         if (mounted) {
+            restoreSettingsView();
             if (mounted.overlay) closeOverview();
             mounted.reference?.removeEventListener('click', mounted.referenceClick, true);
             mounted.settingsItem?.remove();mounted.breadcrumb?.classList.remove('pz-dg-browse-host');mounted.crumb?.classList.remove('pz-dg-crumb');mounted.launch.remove();mounted.routeMenu.remove();mounted.groupLabel.remove();mounted.panel.remove();mounted.status.remove();mounted.slot?.remove();
@@ -2125,7 +2232,7 @@
         const ctx = context(), key = `${ctx.userId}:${ctx.projectId}`;
         if (key !== contextKey) {
             contextKey = key;overviewOpen = false;rows = [];loaded = loading = false;request++;filter = 'all';listPage = 1;signature = '';teardown();for (const binding of [...bindings.values()]) unbind(binding);for (const binding of [...nativeLists.values()]) disposeList(binding);
-            if (ctx.projectId && ctx.userId && sharing) sharing.discover(ctx).then(() => { if (key === contextKey) queue(); }).catch(report);
+            if (ctx.projectId && ctx.userId && sharing) ready(ctx, () => { if (key === contextKey) queue(); }).catch(report);
         }
         if (!ctx.projectId || !ctx.userId) return;
         const host = doc.querySelector(ctx.route === 'issues' ? '.issues' : ctx.route === 'settings' ? '.settings' : '.strings');
@@ -2138,19 +2245,19 @@
             const panel = node('section', null, 'pz-dg-panel');panel.hidden = true;
             const head = node('div', null, 'pz-dg-head'), status = node('p', '', 'pz-dg-status'), content = node('div');
             head.append(node('strong', '疑问分组'), button('收起', closeOverview));
-            const mode = node('div', null, 'pz-dg-mode');panel.append(head, mode, content);
+            panel.append(head, content);
             const reference = ctx.route === 'issues' && [...host.querySelectorAll('a,button')].find(element => /查看\s*\d*\s*有疑问词条|View.*Disputed/i.test(element.textContent));
             if (reference) reference.after(launch);else host.prepend(launch);
             const header = ctx.route === 'issues' ? host.querySelector('header') : null;
             if (header) header.after(panel);else host.prepend(panel);
             // 保存失败信息始终可见，不会跟着折叠的分组面板一起藏起来。
             status.setAttribute('role', 'alert');panel.before(status);
-            mounted = { host, launch, panel, status, content, mode, routeMenu, groupLabel };
+            mounted = { host, launch, panel, status, content, routeMenu, groupLabel };
         }
-        placeLaunch(ctx);syncEditor(editor());syncNativeList();render();
+        placeLaunch(ctx);syncSettingsView(ctx);syncEditor(editor());syncNativeList();render();
     }
     const api = {
-        version: '1.8.6', sync, open: openOverview, managesRoute: managed,
+        version: '1.9.0', sync, open: openOverview, managesRoute: managed,
         groups() { return copy(state().groups); }, createGroup,
         assignment(id) { return state().assignments[String(id)] || ''; }, assign,
         destroy() { destroyed = true;request++;for (const binding of [...bindings.values()]) unbind(binding);for (const binding of [...nativeLists.values()]) disposeList(binding);teardown();doc.removeEventListener('click', dismiss);doc.removeEventListener('keydown', dismiss);page.removeEventListener?.('storage', storageChanged);if (page.ParaTranzDisputeGroups === api) delete page.ParaTranzDisputeGroups; }
@@ -2178,6 +2285,7 @@
     function start() {
         if (!doc.getElementById('pz-dispute-group-style')) {
             const style = node('style');style.id = 'pz-dispute-group-style';style.textContent =
+                '.pz-dg-native-hidden{display:none!important}.pz-dg-settings-page{min-width:0}.pz-dg-settings-page>h3{font-size:1.5rem;margin:0 0 1.25rem;font-weight:600}.pz-dg-settings-page .pz-dg-panel{border:0;border-radius:0;margin:0;padding:0;font-size:inherit}.pz-dg-settings-page .pz-dg-head{display:none}.pz-dg-settings-page .pz-dg-tools{margin:0 0 16px;gap:10px}.pz-dg-settings-page .pz-dg-tools>select{width:320px;max-width:100%}.pz-dg-settings-page .pz-dg-secondary{border:1px solid #adb5bd66;border-radius:5px;color:#6c757d}.pz-dg-settings-page .pz-dg-danger{color:#c54545}.pz-dg-settings-page .pz-dg-rename{flex-basis:100%;flex-wrap:nowrap;max-width:480px}.pz-dg-settings-page .pz-dg-new-group{max-width:440px;flex-wrap:nowrap;margin:0 0 20px}.pz-dg-settings-page .pz-dg-new-group>button{border-radius:5px;background:#007bff;color:#fff;padding:6px 16px}.pz-dg-settings-page .pz-dg-rows{max-height:none;overflow:visible;border-top:1px solid #adb5bd33}.pz-dg-settings-page .pz-dg-row{padding:14px 12px}.pz-dg-settings-page .pz-dg-row:nth-child(odd){background:#6c757d08}.pz-dg-settings-page .pz-dg-row-text>small{font-size:.875em;margin-top:4px}.pz-dg-settings-page .pz-dg-pagination{margin-top:12px}.pz-dg-settings-entry>.nav-link>i{display:inline-block;width:1.25em;text-align:center;margin-right:0!important}.pz-dg-settings-entry>.nav-link>span{margin-left:0}@media(max-width:600px){.pz-dg-settings-page .pz-dg-row{align-items:flex-start;flex-direction:column}.pz-dg-settings-page .pz-dg-row .pz-dg-picker{width:100%}}' +
                 '.pz-dg-panel[hidden],.pz-dg-launch[hidden],.pz-dg-choices[hidden],.pz-dg-create[hidden],.pz-dg-route-menu[hidden]{display:none!important}.pz-dg-launch{margin:0 0 0 10px;padding:3px 8px;border:1px solid #007bff;border-radius:5px;background:transparent;color:#007bff;font-size:.875em;cursor:pointer;vertical-align:middle}.pz-dg-crumb{position:relative}.pz-dg-browse-host{position:relative;padding-right:44px!important}.pz-dg-browse-host>.pz-dg-crumb{position:static}.pz-dg-browse-host .pz-dg-browse-arrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin:0}.pz-dg-launch.pz-dg-browse-arrow{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-left:4px;padding:0;border:0;border-radius:4px;color:inherit;background:transparent;vertical-align:middle;line-height:1}.pz-dg-browse-arrow::after,.pz-dg-arrow::after{content:"";display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid currentColor}.pz-dg-browse-arrow[aria-expanded="true"]::after{transform:rotate(180deg)}.pz-dg-browse-arrow:hover{background:#6c757d12}.pz-dg-browse-arrow:focus-visible{outline:2px solid #007bff;outline-offset:2px}.pz-dg-route-menu{top:calc(100% + 6px);left:auto;right:0;width:max-content;min-width:132px;max-width:min(260px,85vw);max-height:320px;overflow:auto;padding:4px;border:1px solid #adb5bd55;border-radius:8px;box-shadow:0 4px 16px #00000014;background:var(--pt-bg,#fff);color:var(--pt-fg,#212529);font-size:.875rem;z-index:1030}.pz-dg-route-menu>.dropdown-item{padding:5px 12px;border-radius:4px;font:inherit;line-height:1.4;white-space:normal;overflow-wrap:anywhere}.pz-dg-route-menu>.dropdown-item:hover,.pz-dg-route-menu>.dropdown-item:focus-visible{background:#007bff0d;color:#007bff}.pz-dg-route-menu>.pz-dg-selected{background:#007bff12;color:#007bff}.pz-dg-route-menu>.dropdown-divider{margin:4px 8px;border-color:#adb5bd33}.pz-dg-group-label{color:inherit}.pz-dg-settings-entry>.nav-link{width:100%;border:0;background:transparent;text-align:left;font:inherit}.pz-dg-settings-entry .fa-fw{margin-right:.5em}' +
                 '.pz-dg-panel{margin:10px 0 16px;padding:14px;border:1px solid #adb5bd55;border-radius:8px;font-size:.875rem}.pz-dg-head,.pz-dg-tools,.pz-dg-create,.pz-dg-editor-group{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.pz-dg-head{justify-content:space-between;margin-bottom:4px}.pz-dg-tools{margin-top:12px}.pz-dg-create{margin:10px 0}' +
                 '.pz-dg-button{border:0;background:transparent;color:#007bff;padding:5px 8px;cursor:pointer;font:inherit}.pz-dg-panel input,.pz-dg-panel select,.pz-dg-editor-group select,.pz-dg-choices input{font:inherit;border:1px solid #adb5bd66;border-radius:5px;padding:5px 8px;background:transparent;color:inherit;max-width:100%}.pz-dg-muted{color:#6c757d}.pz-dg-status:empty{display:none}.pz-dg-status{color:#b42318;margin:8px 0}' +
@@ -2548,4 +2656,20 @@
     sync();
     }
     if (doc.body) start();else doc.addEventListener('DOMContentLoaded', start, { once: true });
+})();
+
+// ===== 外观：主题切换使用圆心与细光芒的太阳 =====
+(() => {
+    'use strict';
+    const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window, doc = page.document;
+    function start() {
+        if (doc.getElementById('pz-theme-sun-style')) return;
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>';
+        const url = 'data:image/svg+xml,' + encodeURIComponent(svg);
+        const style = doc.createElement('style');style.id = 'pz-theme-sun-style';
+        // 只替换太阳字形，沿用原按钮的颜色、大小、提示和主题切换行为。
+        style.textContent = `#toggleTheme .fa-sun::before{content:"";display:inline-block;width:1em;height:1em;vertical-align:-.125em;background-color:currentColor;-webkit-mask:url("${url}") center/contain no-repeat;mask:url("${url}") center/contain no-repeat}`;
+        doc.head?.appendChild(style);
+    }
+    if (doc.head) start();else doc.addEventListener('DOMContentLoaded', start, { once: true });
 })();
